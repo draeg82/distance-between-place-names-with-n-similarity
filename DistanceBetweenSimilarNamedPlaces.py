@@ -3,14 +3,26 @@ from tqdm import tqdm
 import haversine as hs
 import csv
 
+#############
+# VARIABLES #
+#############
+
 pop_limit = 500
 n_characters_difference = 1
 # change the file paths below to suit.  The population limit above is set to choose the dataset to work with.
 input_file = fr'C:\Users\andys\OneDrive\Documents\1. HOME\Programming\DistanceBetweenPlaces\cities{pop_limit}.txt'
 output_file = fr'C:\Users\andys\OneDrive\Documents\1. HOME\Programming\DistanceBetweenPlaces\output_{pop_limit}.csv'
-headers = ['place1', 'lat1', 'lon1', 'place2', 'lat2', 'lon2', 'havesinedistance']
+
+#############
+# CONSTANTS #
+#############
+headers = ['place1', 'lat1', 'lon1', 'place2', 'lat2', 'lon2', 'haversinedistance']
+colnames = ['geonameid', 'name', 'asciiname', 'alternatenames', 'latitude', 'longitude', 'featureclass', 'featurecode', 'countrycode', 'cc2', 'admin1code', 'admin2code', 'admin3code','admin4code', 'population', 'elevation', 'dem', 'timezone', 'modificationdate']
 
 
+#############
+# FUNCTIONS #
+#############
 def different_by_n_letters(str1, str2, n):
     try:
         #print(str1, str2)
@@ -36,26 +48,35 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     dist = hs.haversine(loc1, loc2)
     return dist
 
-colnames = ['geonameid', 'name', 'asciiname', 'alternatenames', 'latitude', 'longitude', 'featureclass', 'featurecode', 'countrycode', 'cc2', 'admin1code', 'admin2code', 'admin3code','admin4code', 'population', 'elevation', 'dem', 'timezone', 'modificationdate']
-df = pd.read_table(input_file, names=colnames)
+
+########
+# MAIN #
+########
+def main():
+    df = pd.read_table(input_file, names=colnames)
+    place_names = df['name'].tolist()
+    ascii_names = df['asciiname'].tolist()
+    latitudes = df['latitude'].tolist()
+    longitudes = df['longitude'].tolist()
+    place_name_count = len(place_names)
+    
+    with open(output_file, 'w', newline='') as file:
+        writer = csv.writer(file, delimiter=',')
+        writer.writerow(headers)
+    
+    with open(output_file, 'a', newline='') as file:
+        writer = csv.writer(file, delimiter=',')
+        for place in tqdm(range(place_name_count)):
+            for place2 in range(place, place_name_count):
+                if different_by_n_letters(ascii_names[place], ascii_names[place2], n_characters_difference):
+                    distance = haversine_distance(latitudes[place], longitudes[place], latitudes[place2], longitudes[place2])
+                    writer.writerow([ascii_names[place],latitudes[place], longitudes[place],ascii_names[place2],latitudes[place2], longitudes[place2], distance])
 
 
-place_names = df['name'].tolist()
-ascii_names = df['asciiname'].tolist()
-latitudes = df['latitude'].tolist()
-longitudes = df['longitude'].tolist()
-place_name_count = len(place_names)
-
-with open(output_file, 'w', newline='') as file:
-    writer = csv.writer(file, delimiter=',')
-    writer.writerow(headers)
-
-with open(output_file, 'a', newline='') as file:
-    writer = csv.writer(file, delimiter=',')
-    for place in tqdm(range(place_name_count)):
-        for place2 in range(place, place_name_count):
-            if different_by_n_letters(ascii_names[place], ascii_names[place2], n_characters_difference):
-                distance = haversine_distance(latitudes[place], longitudes[place], latitudes[place2], longitudes[place2])
-                writer.writerow([ascii_names[place],latitudes[place], longitudes[place],ascii_names[place2],latitudes[place2], longitudes[place2], distance])
+###############
+# ENTRY POINT #
+###############
+if __name__ == "__main__":
+    main()
             
             
