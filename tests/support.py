@@ -73,3 +73,47 @@ def write_dump(path: Path, rows: list[dict[str, Any]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(dump_text(rows), encoding="utf-8", newline="\n")
     return path
+
+
+def import_dump(
+    database: Path, dump: Path, *, source_threshold: int | None = None, recreate: bool = False
+):
+    """Run the real import over one dump and hand back an open connection to the result.
+
+    The tests go through the production import rather than poking rows in with SQL, so a
+    table the tests built by hand cannot drift from a table the tool builds.
+    """
+    from distnsimilarity.db import connect, import_places
+    from distnsimilarity.datasets import dataset_threshold
+
+    connection = connect(database)
+    threshold = (
+        dataset_threshold(dump.name) if source_threshold is None else source_threshold
+    )
+    import_places(
+        connection,
+        [(threshold, dump)],
+        recreate_database=recreate,
+    )
+    return connection
+
+
+def dump_fields(**overrides: object) -> list[str]:
+    """One dump line as raw tab-separated fields, so a test can break one of them.
+
+    `write_dump` rebuilds a row from keyword arguments and cannot express a line that is
+    missing a column, or a column holding words where a number belongs; this can.
+    """
+    unknown = set(overrides) - set(PLACE_FIELDS)
+    if unknown:
+        raise KeyError(f"not dump fields: {sorted(unknown)}")
+    row = dump_row(1, "Name", 0.0, 0.0)
+    row.update({key: value for key, value in overrides.items()})
+    return [str(row[field]) for field in PLACE_FIELDS]
+
+
+def write_dump_lines(path: Path, lines: list[list[str]]) -> Path:
+    """Write raw field lists as a dump, one row per line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join("\t".join(line) for line in lines) + "\n", encoding="utf-8")
+    return path

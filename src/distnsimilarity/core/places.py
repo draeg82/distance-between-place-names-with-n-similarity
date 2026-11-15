@@ -37,11 +37,13 @@ class Place:
 
 @dataclass(frozen=True)
 class UnreadableRow:
-    """A row the tool refused, and why."""
+    """A row the tool refused, and why. ``source`` names the file it came from when the
+    reader was told, which the importer needs to report a line without a path."""
 
     line_number: int
     reason: str
     content: str
+    source: str = ""
 
 
 def _column(

@@ -76,6 +76,38 @@ def available_datasets(data_dir: Path | None = None) -> list[Dataset]:
     return sorted(datasets, key=lambda dataset: int(dataset.threshold))
 
 
+def dataset_threshold(request: str | int) -> int:
+    """The population threshold a dataset request names: ``5000``, ``"5000"``,
+    ``"cities5000"`` or ``"cities5000.txt"`` all mean 5000.
+
+    This reads the request, not the disk: a population floor and a dump threshold are the
+    same number wearing different jobs, and the interface says one while the search uses the
+    other. Anything unparseable fails, naming the accepted forms.
+    """
+    if isinstance(request, bool):
+        raise DatasetNotAvailableError(
+            f"a population threshold is a number, not a boolean: {request!r}"
+        )
+    if isinstance(request, int):
+        if request < 0:
+            raise DatasetNotAvailableError(f"a population threshold cannot be negative: {request}")
+        return request
+
+    text = str(request).strip()
+    if text.isdigit():
+        return int(text)
+
+    name = Path(text).name
+    stem = name[: -len(".txt")] if name.endswith(".txt") else name
+    if stem.startswith("cities") and stem[len("cities") :].isdigit():
+        return int(stem[len("cities") :])
+
+    raise DatasetNotAvailableError(
+        f"no population threshold in {request!r}: give a number (5000) or a dump name "
+        "(cities5000, cities5000.txt)"
+    )
+
+
 def resolve_dataset(request: str, data_dir: Path | None = None) -> Path:
     """Turn a caller-supplied dataset request into a file path.
 

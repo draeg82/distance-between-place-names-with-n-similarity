@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from distnsimilarity.core.distance import great_circle_distance_km
 from distnsimilarity.core.matching import matches_character_difference
@@ -23,6 +23,30 @@ class MatchedPair:
     first: Place
     second: Place
     distance_km: float
+
+
+def matching_pairs(
+    first: Place, partners: Iterable[Place], character_difference: int
+) -> Iterator[MatchedPair]:
+    """One place against its possible partners - the inner loop of every scan.
+
+    Both candidate paths come through here, so there is exactly one place where a pair of
+    places becomes a reported pair. Partners are consumed as they arrive: nothing here
+    holds a whole candidate set in memory.
+    """
+    # Looked up once, not once per pair: this loop runs billions of times on a big dump.
+    matches = matches_character_difference
+    distance = great_circle_distance_km
+    first_name = first.asciiname
+    first_latitude = first.latitude
+    first_longitude = first.longitude
+    for second in partners:
+        if matches(first_name, second.asciiname, character_difference):
+            yield MatchedPair(
+                first,
+                second,
+                distance(first_latitude, first_longitude, second.latitude, second.longitude),
+            )
 
 
 def scan(
@@ -51,19 +75,10 @@ def scan(
         place for place in places if above_floor(place.population, population_floor)
     ]
     groups = EqualLengthGroups.of(candidates) if equal_length_prefilter else None
-    # Looked up once, not once per pair: this loop runs billions of times on a big dump.
-    matches = matches_character_difference
-    distance = great_circle_distance_km
     for index, first in enumerate(candidates):
-        first_name = first.asciiname
         partners = (
             groups.partners_from(index) if groups is not None else range(index, len(candidates))
         )
-        for position in partners:
-            second = candidates[position]
-            if matches(first_name, second.asciiname, character_difference):
-                yield MatchedPair(
-                    first,
-                    second,
-                    distance(first.latitude, first.longitude, second.latitude, second.longitude),
-                )
+        yield from matching_pairs(
+            first, (candidates[position] for position in partners), character_difference
+        )
