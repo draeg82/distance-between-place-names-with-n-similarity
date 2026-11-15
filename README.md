@@ -2,8 +2,10 @@
 
 Find pairs of places whose ASCII names differ by exactly *n* characters, and how far
 apart they are. Input is a [GeoNames](https://download.geonames.org/export/dump/) places
-dump; the committed dumps are `cities1000.txt`, `cities5000.txt` and `cities15000.txt`
-(the number is the minimum population in the dump, not a row count).
+dump; the committed dumps are `cities1000.txt`, `cities5000.txt` and `cities15000.txt`.
+The number in a dump's name is the population it was cut at, not a guarantee: the
+committed dumps still contain a handful of places below it (52 in `cities15000.txt`), so a
+population floor is something this tool applies rather than inherits.
 
 ## Install
 
@@ -46,9 +48,39 @@ uv run pytest
 ```
 
 That is the whole default suite: no network access, no writes outside a temporary
-directory, and none of the committed dumps loaded, so it finishes in seconds. Tests
-that do read real data are marked `slow` and excluded; run them with
+directory, and none of the committed dumps loaded - 150-odd tests in about a third of a
+second. Tests that do read real data are marked `slow` and excluded; run them with
 `uv run pytest -m slow`.
+
+## Using the core directly
+
+`distnsimilarity.core` is the seam everything else - the command line, the API, the
+browser - is an adapter over. It is importable and callable on its own, with no server and
+no browser:
+
+```python
+from pathlib import Path
+
+from distnsimilarity.core.matching import differing_positions, matches_character_difference
+from distnsimilarity.core.distance import great_circle_distance_km
+from distnsimilarity.core.places import read_places
+from distnsimilarity.core.scan import scan
+
+assert differing_positions("Genoa", "Genoa") == 0
+assert matches_character_difference("Lima", "Loma", 1) is True
+assert matches_character_difference("Aba", "Abba", 1) is False  # unequal lengths never match
+assert great_circle_distance_km(0.0, 0.0, 1.0, 0.0) == 111.1950802335329  # one degree of arc
+
+for match in scan(read_places(Path("cities15000.txt")), 1):
+    print(match.first.asciiname, match.second.asciiname, match.distance_km)
+```
+
+The rules are the ones the original script implemented, and they are frozen by
+`tests/test_matching_rules.py`, `tests/test_distance_rules.py` and
+`tests/test_scan_reports.py`: equal lengths are required, differences are counted
+positionally rather than as edits, a pair matches at exactly the requested count and no
+other, comparison is case-sensitive, accents count as differing from their folded letters,
+and only the ASCII name column is compared.
 
 ## Troubleshooting
 

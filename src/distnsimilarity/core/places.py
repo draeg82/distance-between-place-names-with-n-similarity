@@ -44,26 +44,44 @@ class UnreadableRow:
     content: str
 
 
+def _column(
+    fields: list[str],
+    index: int,
+    column: str,
+    line_number: int,
+    converter: type[int] | type[float],
+    expected: str,
+) -> int | float:
+    """One numeric column, with the column named in whatever refusal it produces."""
+    raw = fields[index]
+    try:
+        return converter(raw)
+    except ValueError as error:
+        raise PlaceRowError(
+            f"line {line_number}: column {index + 1} ({column}) is not {expected}: {raw!r}"
+        ) from error
+
+
 def _parse_row(fields: list[str], line_number: int) -> Place:
     if len(fields) != DUMP_FIELD_COUNT:
         raise PlaceRowError(
             f"line {line_number}: expected {DUMP_FIELD_COUNT} tab-separated fields, got {len(fields)}"
         )
-    geonameid, name, asciiname, _alternates, latitude, longitude = fields[:6]
-    country_code = fields[8]
-    population = fields[14]
-    try:
-        place = Place(
-            geonameid=int(geonameid),
-            display_name=name,
-            asciiname=asciiname,
-            latitude=float(latitude),
-            longitude=float(longitude),
-            population=int(population) if population.strip() else 0,
-            country_code=country_code,
-        )
-    except ValueError as error:
-        raise PlaceRowError(f"line {line_number}: {error} in {fields!r}") from error
+    _geonameid_field, name, asciiname, _alternates = fields[:4]
+    population_field = fields[14]
+    place = Place(
+        geonameid=int(_column(fields, 0, "geonameid", line_number, int, "an integer")),
+        display_name=name,
+        asciiname=asciiname,
+        latitude=float(_column(fields, 4, "latitude", line_number, float, "a number")),
+        longitude=float(_column(fields, 5, "longitude", line_number, float, "a number")),
+        population=(
+            0
+            if not population_field.strip()
+            else int(_column(fields, 14, "population", line_number, int, "an integer"))
+        ),
+        country_code=fields[8],
+    )
     if not -90.0 <= place.latitude <= 90.0:
         raise PlaceRowError(f"line {line_number}: latitude {place.latitude} out of range")
     if not -180.0 <= place.longitude <= 180.0:
@@ -93,5 +111,11 @@ def read_places_lenient(path: Path) -> tuple[list[Place], list[UnreadableRow]]:
         try:
             places.append(_parse_row(fields, line_number))
         except PlaceRowError as error:
-            problems.append(UnreadableRow(line_number, str(error).split(": ", 1)[-1], "\t".join(fields)))
+            problems.append(
+                UnreadableRow(
+                    line_number,
+                    str(error).split(": ", 1)[-1],
+                    "\t".join(fields),
+                )
+            )
     return places, problems
