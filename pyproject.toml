@@ -1,0 +1,41 @@
+[project]
+name = "distnsimilarity"
+version = "0.1.0"
+description = "Find pairs of places whose ASCII names differ by exactly n characters, and how far apart they are."
+readme = "README.md"
+requires-python = ">=3.11"
+# Every runtime dependency carries an explicit floor: a future major release must not
+# silently change a call signature we rely on (see README: Portability).
+dependencies = [
+    "haversine>=2.8.0",   # great-circle distance; call signature hs.haversine((lat, lon), (lat, lon)) -> km
+    "fastapi>=0.115.0",   # search API adapter over the core
+    "uvicorn>=0.30.0",    # ASGI server for the search API
+    "tqdm>=4.66.0",       # CLI progress display only
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",      # ASGI test client for the API contract tests
+]
+
+[project.scripts]
+distnsimilarity-search = "distnsimilarity.cli:main"
+distnsimilarity-import = "distnsimilarity.db.import_command:main"
+distnsimilarity-serve = "distnsimilarity.api.server:main"
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/distnsimilarity"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-m 'not slow' --strict-markers"
+markers = [
+    "slow: end-to-end tests against the committed GeoNames dumps; excluded from the default run",
+]
+filterwarnings = ["error::DeprecationWarning"]
