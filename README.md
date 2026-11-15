@@ -31,6 +31,7 @@ uv run distnsimilarity-search --dataset 15000 --n 1 --output /tmp/out.csv
 | `--n` | Character-difference value: pairs match when their equal-length ASCII names differ in exactly this many positions. Required. |
 | `--output` | Where to write the CSV. Required. |
 | `--min-population` | Optional population floor; places below it are never compared. |
+| `--full-comparison` | Compare every place against every later place instead of only places whose ASCII name is the same length. Same pairs, same order, same CSV; far slower. |
 
 `--dataset`, `--n` and `--output` are always supplied by the caller: the tool has no
 default input file and no default output location. A dataset request that cannot be
@@ -40,6 +41,11 @@ Output is UTF-8 with `\r\n` record separators, header
 `place1,lat1,lon1,place2,lat2,lon2,haversinedistance`, distances in kilometres.
 
 Two searches over the same dumps produce the same rows in the same order.
+
+A search only ever compares names of equal length, because the matching rule needs equal
+lengths anyway - on `cities1000.txt` that is 927 million comparisons instead of 10.77
+billion. `--full-comparison` switches the shortcut off; it exists so the shortcut can be
+argued with, and it writes the same bytes. `scripts/benchmark_scan.py` measures it.
 
 ## Run the tests
 

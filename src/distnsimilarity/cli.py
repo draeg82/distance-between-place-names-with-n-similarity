@@ -53,6 +53,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Population floor: places below it are never compared.",
     )
+    parser.add_argument(
+        "--full-comparison",
+        action="store_true",
+        help=(
+            "Compare every place against every later place instead of only places whose "
+            "ASCII name is the same length. Same pairs, same order, same CSV; much slower. "
+            "Useful for checking the prefilter against itself."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress the progress display.")
     return parser
 
@@ -68,7 +77,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     pairs = 0
     with LegacyCsvWriter(arguments.output) as writer:
-        matches = scan(places, arguments.n, arguments.min_population)
+        matches = scan(
+            places,
+            arguments.n,
+            arguments.min_population,
+            equal_length_prefilter=not arguments.full_comparison,
+        )
         for match in tqdm(matches, disable=arguments.quiet, unit="pair", desc="matching"):
             writer.write(match.first, match.second, match.distance_km)
             pairs += 1
