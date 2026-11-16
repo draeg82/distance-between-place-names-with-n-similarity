@@ -17,7 +17,13 @@ from dataclasses import dataclass
 
 from distnsimilarity.core.places import Place
 from distnsimilarity.core.prefilter import all_pair_count
-from distnsimilarity.core.scan import MatchedPair, matching_pairs
+from distnsimilarity.core.scan import (
+    POLL_EVERY_COMPARISONS,
+    CancelCheck,
+    MatchedPair,
+    Progress,
+    matching_pairs,
+)
 from distnsimilarity.db.schema import (
     PLACE_SELECT,
     DatabaseNotImportedError,
@@ -199,6 +205,9 @@ def scan_database(
     exclude_geonameid: int | None = None,
     equal_length_prefilter: bool = True,
     page_size: int = DEFAULT_PAGE_SIZE,
+    cancel: CancelCheck | None = None,
+    progress: Progress | None = None,
+    poll_every_comparisons: int = POLL_EVERY_COMPARISONS,
 ) -> Iterator[MatchedPair]:
     """Every matching pair in the database, one name-length group at a time.
 
@@ -210,6 +219,10 @@ def scan_database(
     With `equal_length_prefilter` off, every candidate is compared against every other one
     as it was before the prefilter existed; the pairs reported are the same either way,
     which is what `tests/test_database_candidates.py` checks in both directions.
+
+    `cancel` stops the walk between two comparisons, the same check the file-backed scan
+    makes: a cancelled search stops fetching name-length groups as well as comparing them.
+    `progress` counts the comparisons it made, once per poll window.
     """
     if place_count(connection) == 0:
         raise DatabaseNotImportedError(
@@ -225,10 +238,18 @@ def scan_database(
                 page_size=page_size,
             )
         )
-        yield from _scan_group(everything, character_difference)
+        yield from _scan_group(
+            everything,
+            character_difference,
+            cancel=cancel,
+            progress=progress,
+            poll_every_comparisons=poll_every_comparisons,
+        )
         return
 
     for name_length in candidate_name_lengths(connection, population_floor):
+        if cancel is not None and cancel():
+            return
         group = list(
             candidate_places(
                 connection,
@@ -238,10 +259,30 @@ def scan_database(
                 page_size=page_size,
             )
         )
-        yield from _scan_group(group, character_difference)
+        yield from _scan_group(
+            group,
+            character_difference,
+            cancel=cancel,
+            progress=progress,
+            poll_every_comparisons=poll_every_comparisons,
+        )
 
 
-def _scan_group(group: list[Place], character_difference: int) -> Iterator[MatchedPair]:
+def _scan_group(
+    group: list[Place],
+    character_difference: int,
+    *,
+    cancel: CancelCheck | None = None,
+    progress: Progress | None = None,
+    poll_every_comparisons: int = POLL_EVERY_COMPARISONS,
+) -> Iterator[MatchedPair]:
     """One group, walked the way a scan walks any candidate list."""
     for index, first in enumerate(group):
-        yield from matching_pairs(first, group[index:], character_difference)
+        yield from matching_pairs(
+            first,
+            group[index:],
+            character_difference,
+            cancel=cancel,
+            progress=progress,
+            poll_every_comparisons=poll_every_comparisons,
+        )

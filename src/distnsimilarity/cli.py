@@ -1,22 +1,37 @@
 """The command-line adapter: a headless search over one GeoNames dump.
 
 This is an adapter, not the seam: everything it does is available by calling
-``distnsimilarity.core`` directly, and that is what the tests do.
+``distnsimilarity.search.open_search``, and that is what both this and the HTTP API use.
+What the command line adds is a CSV file, a progress display, and a Ctrl-C handler that
+stops the search instead of abandoning it.
 """
 
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 from pathlib import Path
-from typing import Sequence
+from types import FrameType
+from typing import Callable, Sequence
 
 from tqdm import tqdm
 
-from distnsimilarity.core.places import PlaceRowError, read_places
-from distnsimilarity.core.scan import scan
-from distnsimilarity.datasets import DatasetNotAvailableError, resolve_dataset
+from distnsimilarity.core.places import PlaceRowError
+from distnsimilarity.datasets import DatasetNotAvailableError
 from distnsimilarity.export.csv_export import LegacyCsvWriter
+from distnsimilarity.search import (
+    CacheNotImportedError,
+    InvalidSearchRequest,
+    SearchControl,
+    SearchRequest,
+    SearchSession,
+    open_search,
+)
+
+#: "Stopped, and the process was asked to stop": the 128 + SIGINT convention, so a script
+#: wrapping a cancelled search can tell it apart from a search that found nothing.
+EXIT_CANCELLED = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +69,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Population floor: places below it are never compared.",
     )
     parser.add_argument(
+        "--database",
+        type=Path,
+        default=None,
+        help=(
+            "Search the imported place cache at this path instead of reading the dump. "
+            "The dataset is still required: it says what the search covers."
+        ),
+    )
+    parser.add_argument(
         "--full-comparison",
         action="store_true",
         help=(
@@ -66,30 +90,79 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _stop_on_signal(control: SearchControl) -> Callable[[int, FrameType | None], None]:
+    """A signal handler that stops the search rather than killing the process.
+
+    A search writes its CSV as it goes, so an interrupted run leaves a CSV holding exactly
+    the pairs that were found - which is the same partial result a client that stops
+    reading gets over HTTP.
+    """
+
+    def handle(signum: int, _frame: FrameType | None) -> None:
+        control.cancel(f"stopped by {signal.Signals(signum).name}")
+
+    return handle
+
+
+def write_pairs(session: SearchSession, output: Path, *, quiet: bool = False) -> int:
+    """Write every pair the search reports, as it reports it, and say how many there were."""
+    pairs = 0
+    with LegacyCsvWriter(output) as writer:
+        for match in tqdm(
+            session.pairs, disable=quiet, unit="pair", desc=f"matching n={session.request.n}"
+        ):
+            writer.write(match.first, match.second, match.distance_km)
+            pairs += 1
+    return pairs
+
+
+def main(argv: Sequence[str] | None = None, *, control: SearchControl | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
-        path = resolve_dataset(arguments.dataset)
-        places = read_places(path)
-    except (DatasetNotAvailableError, PlaceRowError) as error:
+        request = SearchRequest(
+            dataset=arguments.dataset,
+            n=arguments.n,
+            min_population=arguments.min_population,
+            equal_length_prefilter=not arguments.full_comparison,
+            database=arguments.database,
+        )
+    except InvalidSearchRequest as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    search_control = SearchControl() if control is None else control
+    try:
+        session = open_search(request, control=search_control)
+    except (DatasetNotAvailableError, PlaceRowError, CacheNotImportedError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    pairs = 0
-    with LegacyCsvWriter(arguments.output) as writer:
-        matches = scan(
-            places,
-            arguments.n,
-            arguments.min_population,
-            equal_length_prefilter=not arguments.full_comparison,
+    install = getattr(signal, "signal", None)
+    previous: object = None
+    if install is not None:
+        try:
+            previous = install(signal.SIGINT, _stop_on_signal(search_control))
+        except ValueError:  # not the main thread: the caller keeps its own control
+            install = None
+
+    try:
+        pairs = write_pairs(session, arguments.output, quiet=arguments.quiet)
+    finally:
+        if install is not None and previous is not None:
+            install(signal.SIGINT, previous)  # type: ignore[arg-type]
+
+    stats = session.stats
+    if stats.cancelled:
+        print(
+            f"cancelled after {stats.pairs_emitted} pair(s) at n={request.n}: "
+            f"{search_control.reason}. {arguments.output} holds what was found.",
+            file=sys.stderr,
         )
-        for match in tqdm(matches, disable=arguments.quiet, unit="pair", desc="matching"):
-            writer.write(match.first, match.second, match.distance_km)
-            pairs += 1
+        return EXIT_CANCELLED
 
     print(
-        f"{pairs} pair(s) at n={arguments.n} from {path.name} "
-        f"({len(places)} places) written to {arguments.output}"
+        f"{pairs} pair(s) at n={arguments.n} from {session.name} "
+        f"({stats.places} places) written to {arguments.output}"
     )
     return 0
 

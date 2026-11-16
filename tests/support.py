@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any
 
@@ -117,3 +118,32 @@ def write_dump_lines(path: Path, lines: list[list[str]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join("\t".join(line) for line in lines) + "\n", encoding="utf-8")
     return path
+
+
+def noisy_dump(
+    path: Path, *, places: int = 1_500, name_length: int = 7, seed: int = 20261116
+) -> Path:
+    """A dump that starts with one pair and then searches for a while without finding one.
+
+    Cancellation and streaming need a scan that takes noticeable time without being a real
+    dataset. Every name here is the same length, so the equal-length prefilter cannot skip
+    the noise and the scan has to walk it; the first two rows are a planted pair at `n=1`.
+    The names come from a seeded generator, so the file is the same every time and a test can
+    compare a stopped search against a full one.
+    """
+    generator = random.Random(seed)
+    rows = [
+        dump_row(1, "abelard", 44.0, -93.0, population=50_000),
+        dump_row(2, "abelurd", 39.0, -89.0, population=40_000),
+    ]
+    for index in range(3, places + 1):
+        name = "".join(generator.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(name_length))
+        rows.append(dump_row(index, name, index / 100.0, index / 50.0, population=1_000))
+    return write_dump(path, rows)
+
+
+#: The pair `noisy_dump` plants, in the order a scan reports it (file order).
+NOISY_DUMP_PAIR = ("abelard", "abelurd")
+
+#: The character difference `noisy_dump` is planted to match at.
+NOISY_CHARACTER_DIFFERENCE = 1

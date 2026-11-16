@@ -128,6 +128,47 @@ scan, on a fixture and on the real 146,782 places.
 The terminal still reads dumps, so the CSV it writes stays exactly what the original tool
 wrote. The search API and the browser search the database.
 
+## Watch a search over HTTP
+
+The same search, streamed. Start the server and read a search as it happens:
+
+```bash
+uv run distnsimilarity-serve --data-dir .      # 127.0.0.1:8000
+uv run distnsimilarity-watch --dataset 15000 --n 1
+```
+
+`GET /v1/search` answers newline-delimited JSON, one event per line, while the scan runs:
+
+| Event | Carries |
+| --- | --- |
+| `started` | the request back, what it resolved to, `candidate_pairs`, and the cost estimate |
+| `progress` | pairs compared, share of the candidate pairs, elapsed and remaining time |
+| `results` | the current best-so-far list: both places, the distance, and how many positions the names differ in |
+| `done` | final counts, elapsed total, and whether the search completed, was cancelled (with a reason, and `retryable: true`) or failed |
+
+Other endpoints: `/healthz` (alive, and how many searches are live), `/v1/datasets` (what can
+be searched, and the state of the place cache), `/v1/estimate` (what a search would cost,
+without searching), and `/v1/searches` plus `/v1/searches/{id}` (what is running now, and the
+last few that ended).
+
+Three things about the stream are deliberate:
+
+- **The scan waits for its reader.** A search is pulled a slice at a time - as many finds as
+  `--batch-size`, or `--step-seconds` of looking, or until the best-so-far list improves -
+  which is why a list arrives *during* the scan rather than after it, and why a rare match
+  does not arrive in the same event as the whole rest of the file.
+- **Improvements are coalesced.** The ranking may change twenty times in `--results-interval`
+  (0.25 s by default) and the client is sent the current list once. Progress ticks on their
+  own, on `--progress-interval`, and only when something has actually been compared.
+- **One search at a time.** A second `GET /v1/search` while one runs is refused with 409
+  naming the search in the way and how to stop it; a queued second scan would only make the
+  first slower and hide that. Hanging up - Ctrl-C in the watcher - cancels the scan within a
+  few thousand comparisons rather than letting it run to the end for nobody.
+
+The watcher prints the cost first, then the best list again every time the server sends a
+better one; `--rows` trims it and `--no-progress` leaves the ticks out. It ranks, sorts and
+filters nothing: the order it prints is the order the `results` events arrived in.
+
 ## Run the tests
 
 ```bash

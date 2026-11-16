@@ -24,6 +24,27 @@ def differing_positions(first: str, second: str) -> int:
     return sum(1 for left, right in zip(first, second) if left != right)
 
 
+def differing_position_indexes(first: str, second: str) -> tuple[int, ...]:
+    """Which positions two equal-length ASCII names differ in, counting from zero.
+
+    The count is what a threshold is compared against; the indexes are what an interface
+    shows a reader, so that "these two names differ in 2 positions" can be pointed at.
+    The two agree by construction: this is ``differing_positions`` with the positions kept.
+    """
+    if not isinstance(first, str) or not isinstance(second, str):
+        raise TypeError(
+            f"ASCII names must be strings, got {type(first).__name__} and {type(second).__name__}"
+        )
+    if len(first) != len(second):
+        raise ValueError(
+            f"Names of different length cannot be compared: {first!r} ({len(first)}) "
+            f"and {second!r} ({len(second)})"
+        )
+    return tuple(
+        position for position, (left, right) in enumerate(zip(first, second)) if left != right
+    )
+
+
 def matches_character_difference(first: str, second: str, character_difference: int) -> bool:
     """True when the names differ in exactly ``character_difference`` positions."""
     if not isinstance(character_difference, int) or isinstance(character_difference, bool):

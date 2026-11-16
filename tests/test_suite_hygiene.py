@@ -73,10 +73,30 @@ class TestTheSlowEscapeHatch:
 
 
 class TestOffline:
-    def test_a_socket_cannot_be_opened_by_a_default_test(self) -> None:
+    def test_a_default_test_cannot_connect_somewhere_else(self) -> None:
+        """The guard is about leaving the machine, not about touching a socket: the HTTP
+        tests run a real server on the loopback interface, and nothing else is allowed."""
         with pytest.raises(AssertionError) as blocked:
-            socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("93.184.216.34", 80))
         assert "network" in str(blocked.value)
+        with pytest.raises(AssertionError) as blocked:
+            socket.getaddrinfo("example.com", 443)
+        assert "example.com" in str(blocked.value), "the refusal names what was asked for"
+
+    def test_a_loopback_socket_still_works(self) -> None:
+        """A round trip to a listening socket on this machine is allowed, so the HTTP tests
+        can be written against a real server and a real client."""
+        listening = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listening.bind(("127.0.0.1", 0))
+        listening.listen(1)
+        address = listening.getsockname()
+        try:
+            client = socket.create_connection(address, timeout=5)
+            client.sendall(b"ping")
+            assert listening.accept()[0].recv(4) == b"ping"
+        finally:
+            client.close()
+            listening.close()
 
     def test_a_scan_over_two_hundred_places_needs_no_network(self, tmp_path: Path) -> None:
         rows = [

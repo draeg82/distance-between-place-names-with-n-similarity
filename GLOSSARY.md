@@ -110,6 +110,47 @@ How far apart two places are along the sphere, in kilometres — the distance a 
 drawn on a globe would measure.
 _Avoid_: haversine distance (in prose), driving distance, displacement
 
+### Watching a search
+
+**Search session**:
+One search as an object: the request it was made from, the candidate set the request resolved
+to, the pairs it reports as it finds them, and the counters that say how far it got. The
+terminal and the stream both drive a session and nothing else.
+_Avoid_: job, task, query handle
+
+**Search stream**:
+A search written out as newline-delimited JSON while it runs - one `started`, `progress` and
+`results` as it goes, one `done` at the end. The events are the search, not a report of it
+afterwards.
+_Avoid_: SSE, websocket, polling
+
+**Best-so-far list**:
+The best distances found so far, at most `top_k` of them, in the order the core ranked them.
+Every `results` event carries that list at a moment when the scan is still going, which is
+what makes a search watchable.
+_Avoid_: partial results (as a name), leaderboard, answer
+
+**Coalescing**:
+Sending the best-so-far list at most once per interval, however many times the ranking
+improved inside it. A hot scan cannot flood a client.
+_Avoid_: batching, debouncing, buffering
+
+**Slice**:
+How much of a scan is pulled aside before the scan is let go: the finds so far, plus as much
+looking as `--step-seconds` allows, and stopping at once when the best-so-far list improves.
+_Avoid_: batch, chunk, page
+
+**Pacing**:
+Holding a scan at one of its own poll boundaries until the reader watching it has taken what
+has been found, so the scan goes at the reader's speed rather than the machine's - see
+`docs/adr/0006-a-watched-scan-is-held-at-its-own-poll-boundaries.md`.
+_Avoid_: throttling, backpressure (in prose), rate limiting
+
+**Watching**:
+Reading a search's stream while it happens, from a terminal or a browser, and stopping it by
+hanging up.
+_Avoid_: tailing, following, live view
+
 ### The shape of the tool
 
 **The seam**:
