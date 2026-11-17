@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DistNSimilarity - places whose names differ by n characters</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Places whose names differ by <em>n</em> characters</h1>
+      <p id="database-line" class="database-line">Asking this server which places it searches&hellip;</p>
+    </header>
+
+    <main>
+      <form id="search-form" class="controls">
+        <fieldset>
+          <legend>Everywhere mode: the whole candidate set, one threshold</legend>
+          <label>
+            <span>Differing characters</span>
+            <input id="n" name="n" type="number" min="0" step="1" value="1" required />
+          </label>
+          <label>
+            <span>Dataset</span>
+            <select id="dataset" name="dataset">
+              <option value="">loading the dataset choices&hellip;</option>
+            </select>
+          </label>
+          <label>
+            <span>Minimum population</span>
+            <input
+              id="min_population"
+              name="min_population"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="the dataset floor"
+            />
+          </label>
+          <label>
+            <span>Ranking</span>
+            <select id="direction" name="direction">
+              <option value="greatest">greatest distance first</option>
+              <option value="least">least distance first</option>
+            </select>
+          </label>
+          <label>
+            <span>Best finds kept</span>
+            <input id="top_k" name="top_k" type="number" min="1" max="2000" step="1" value="50" />
+          </label>
+        </fieldset>
+        <div class="actions">
+          <button id="start-button" type="submit">Search</button>
+          <button id="stop-button" type="button" hidden>Stop</button>
+        </div>
+      </form>
+
+      <section class="running">
+        <p id="estimate-line" class="estimate-line"></p>
+        <p id="status-line" class="status-line" role="status" aria-live="polite">
+          <span id="working-indicator" class="working" hidden aria-hidden="true"></span>
+          <span id="status-text"></span>
+        </p>
+        <p id="progress-line" class="progress-line"></p>
+        <p id="message-line" class="message-line" role="status" aria-live="polite"></p>
+      </section>
+
+      <table id="results-table" class="results-table" hidden>
+        <caption>
+          Best finds so far, in the order the search ranked them. The list changes while the scan
+          runs.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">First place</th>
+            <th scope="col">Country</th>
+            <th scope="col">Population</th>
+            <th scope="col">Second place</th>
+            <th scope="col">Country</th>
+            <th scope="col">Population</th>
+            <th scope="col">Distance (km)</th>
+            <th scope="col">Differing characters</th>
+          </tr>
+        </thead>
+        <tbody id="result-rows"></tbody>
+      </table>
+    </main>
+
+    <footer>
+      <p>
+        Matching, ranking and distances come from this server: every row on this page arrived on
+        a search stream. Nothing here compares two names or measures a distance.
+      </p>
+    </footer>
+  </body>
+</html>

@@ -131,6 +131,12 @@ How far apart two places are along the sphere, in kilometres — the distance a 
 drawn on a globe would measure.
 _Avoid_: haversine distance (in prose), driving distance, displacement
 
+**Everywhere mode**:
+A search that names no place to start from: everything in the chosen dataset is compared with
+everything else at one character difference, and the answer is the pairs that are furthest, or
+nearest, wherever they are. The question the tool exists for.
+_Avoid_: global search, all-pairs mode, exhaustive scan
+
 ### Watching a search
 
 **Search session**:

@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from distnsimilarity.api.frontend import mount_frontend
 from distnsimilarity.api.payload import (
     DEFAULT_RESULTS_INTERVAL,
     NDJSON_MEDIA_TYPE,
@@ -231,6 +232,9 @@ def create_app(
     app.state.pool = pool
     app.state.data_dir = None if data_dir is None else Path(data_dir)
     app.state.database = None if database is None else Path(database)
+    # The browser adapter is served by the process that answers it, so one command starts both
+    # and the page cannot be looking at a different place database than the search it runs.
+    mount_frontend(app)
 
     def cache_path() -> Path:
         """The database this server searches.

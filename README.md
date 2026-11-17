@@ -187,6 +187,32 @@ The watcher prints the cost first, then the best list again every time the serve
 better one; `--rows` trims it and `--no-progress` leaves the ticks out. It ranks, sorts and
 filters nothing: the order it prints is the order the `results` events arrived in.
 
+### Or watch it in a browser
+
+The same server serves the app, so there is still one process and one port:
+
+```bash
+uv run distnsimilarity-serve --data-dir .      # 127.0.0.1:8000, and open that address
+```
+
+The form is everywhere mode: a character-difference value, a dataset, an optional population
+floor, a direction and a list size - the same parameters the watcher takes, with the dataset
+choices and their wording read from `/v1/datasets` rather than written into the page. The cost
+of the search is printed before the stream opens; the working indicator and the progress line
+say what the scan is doing while it does it; the best-so-far list is replaced whole every time
+the server sends a better one, in place, without a refresh. Stop hangs up on the stream, which
+is how this API is told to cancel, and the list on screen stays as what was found so far. A
+search that matches nothing says so with the parameters it used, because "nothing over every
+place in the database" and "nothing over towns of 5,000" are different findings.
+
+The front end is four files served from the package - a page, two ES modules and a stylesheet -
+with no build step and nothing loaded from another machine
+(`docs/adr/0008-the-front-end-is-plain-es-modules.md`). `results.js` turns events into words and
+table cells; `app.js` asks for a search, reads the stream a line at a time and draws what comes
+back. Neither one matches, ranks, sorts or measures: the order on screen is the order the
+`results` events arrived in, and the highlighted characters are the positions the API said
+differ.
+
 ## Run the tests
 
 ```bash
@@ -199,6 +225,11 @@ Tests that do read real data are marked `slow` and excluded; run them with
 `uv run pytest -m slow`. The slow suite imports all three dumps into a temporary database,
 checks the 230,160 → 146,782 deduplication against the real files, and confirms the
 query plans on a table big enough for the planner to mean it; it takes about four seconds.
+
+The front end's presentation is checked by running its module with Node, which turns
+"the differing characters are highlighted" into an assertion about output rather than a
+look at a screenshot. Node is a developer's tool and not a dependency: where it is not
+installed those few tests skip and say so, and everything else still runs.
 
 ## Using the core directly
 
