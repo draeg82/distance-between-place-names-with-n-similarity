@@ -5,14 +5,17 @@ this is where the things they share are pinned: which pairs come out, in which o
 a bad request costs, and what a cancelled search leaves behind. The adapter tests only check
 that their adapter passes this through.
 
-The cancellation tests need a scan long enough to interrupt, which is what `noisy_dump` is
+The search source is the place database, so every fixture here is a database:
+`place_database` in `tests/support.py` writes rows to a throwaway dump and runs the real import
+over them.
+
+The cancellation tests need a scan long enough to interrupt, which is what `noisy_database` is
 for: a planted pair first, then a long stretch of equal-length names that match nothing.
 Everything else runs on hand-checkable fixtures.
 """
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -20,10 +23,11 @@ from pathlib import Path
 import pytest
 
 from distnsimilarity.core.matching import differing_position_indexes
-from distnsimilarity.core.places import read_places
 from distnsimilarity.core.scan import scan
 from distnsimilarity.core.topk import DEFAULT_TOP_K, Ranking, snapshots
-from distnsimilarity.datasets import DatasetNotAvailableError
+from distnsimilarity.datasets import DatasetNotAvailableError, WHOLE_DATABASE_LABEL
+from distnsimilarity.db.candidates import candidate_places, dataset_options
+from distnsimilarity.db.schema import connect
 from distnsimilarity.search import (
     CacheNotImportedError,
     InvalidSearchRequest,
@@ -36,13 +40,12 @@ from support import (
     NOISY_CHARACTER_DIFFERENCE,
     NOISY_DUMP_PAIR,
     dump_row,
-    import_dump,
-    noisy_dump,
-    write_dump,
+    noisy_database,
+    place_database,
 )
 
 
-def two_pair_dump(path: Path) -> Path:
+def two_pair_database(path: Path) -> Path:
     """Six places, three pairs at `n=1`, in an order a reader can check by eye.
 
     Two pairs share a name, so the order pairs come out in says something about the scan:
@@ -56,59 +59,91 @@ def two_pair_dump(path: Path) -> Path:
         dump_row(15, "brand", 44.0, -104.0, population=50_000),
         dump_row(16, "braid", 45.0, -105.0, population=40_000),
     ]
-    return write_dump(path, rows)
+    return place_database(path, rows)
 
 
-def pairs_of(request: SearchRequest, data_dir: Path | None = None) -> list[tuple[str, str, float]]:
+def pairs_of(request: SearchRequest) -> list[tuple[str, str, float]]:
     """Every pair a search reports, as `(name1, name2, distance)` - the shape tests compare."""
-    session = open_search(request, data_dir=data_dir)
+    session = open_search(request)
     return [(m.first.asciiname, m.second.asciiname, m.distance_km) for m in session.pairs]
 
 
 class TestOpeningASearch:
-    def test_a_search_names_its_dataset_and_how_many_places_it_holds(
+    def test_a_search_says_what_it_covers_and_how_many_places_it_holds(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        session = open_search(SearchRequest(dataset=str(dump), n=1), data_dir=tmp_path)
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        session = open_search(SearchRequest(database=database, n=1, dataset="5000"))
 
-        assert session.name == "cities6.txt"
-        assert session.stats.places == 6, (
-            f"the search reported {session.stats.places} places for a 6-row dump"
+        assert session.name == "cities of 5,000 or more people", (
+            "a search says what it covers in the words a person chooses a dataset with, not as "
+            f"a file name: {session.name!r}"
         )
-        assert session.source == "dump"
+        assert session.stats.places == 6, (
+            f"the search reported {session.stats.places} places for a 6-row database"
+        )
+        assert session.stats.dataset_threshold == 5_000
+        assert session.stats.database_path.endswith("places.sqlite3")
 
     def test_the_pairs_come_in_the_order_the_core_scan_reports_them(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        request = SearchRequest(dataset=str(dump), n=1)
+        """The seam adds no ordering of its own.
 
-        through_the_seam = pairs_of(request, tmp_path)
-        places = read_places(dump)
+        The reference is the core scan over the same candidates in the order the database hands
+        them out - population ascending - which is the order the two can be compared in.
+        """
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        request = SearchRequest(database=database, n=1)
+
+        through_the_seam = pairs_of(request)
+        connection = connect(database)
         straight_off_the_scan = [
-            (m.first.asciiname, m.second.asciiname, m.distance_km) for m in scan(places, 1)
+            (m.first.asciiname, m.second.asciiname, m.distance_km)
+            for m in scan(list(candidate_places(connection, None)), 1)
         ]
+        connection.close()
 
         assert through_the_seam == straight_off_the_scan, (
             "the seam and the scan disagree about which pairs or what order - through the "
             f"seam {through_the_seam}, straight off the scan {straight_off_the_scan}"
         )
 
-    def test_a_dataset_that_is_not_there_is_refused_before_any_pair(self, tmp_path: Path) -> None:
+    def test_a_dataset_that_names_no_threshold_is_refused(self, tmp_path: Path) -> None:
+        """A dataset is a population rule, so the spellings that are not one are refused."""
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        for not_a_dataset in ("   ", str(database), "../dumps/cities5000.txt"):
+            with pytest.raises(InvalidSearchRequest) as refused:
+                SearchRequest(database=database, n=1, dataset=not_a_dataset)
+            assert "dataset" in str(refused.value), (
+                f"refusing {not_a_dataset!r} did not say so: {refused.value}"
+            )
+
+    def test_a_dataset_this_database_cannot_honour_names_the_choices_that_exist(
+        self, tmp_path: Path
+    ) -> None:
+        """99,000 is a rule no place here is under, so it is not a dataset of this database.
+
+        An empty result would be a reportable answer, but a useless one: nobody asks to search
+        only the cities of 99,000 or more people in a cache of places that top out lower. The
+        refusal answers the question that was actually being asked, which is what is searchable
+        here.
+        """
+        database = two_pair_database(tmp_path / "places.sqlite3")
+
         with pytest.raises(DatasetNotAvailableError) as refused:
-            open_search(SearchRequest(dataset="cities99999.txt", n=1), data_dir=tmp_path)
-        assert "cities99999.txt" in str(refused.value)
+            open_search(SearchRequest(database=database, n=1, dataset="99000"))
+
+        message = str(refused.value)
+        assert "99,000" in message, message
+        assert "every place in the database" in message, (
+            f"the refusal has to name what this database can be searched as: {message}"
+        )
 
     def test_a_negative_character_difference_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(InvalidSearchRequest) as refused:
-            SearchRequest(dataset=str(two_pair_dump(tmp_path / "cities6.txt")), n=-1)
+            SearchRequest(database=two_pair_database(tmp_path / "places.sqlite3"), n=-1)
         assert "cannot be negative" in str(refused.value)
-
-    def test_a_request_naming_no_dataset_is_refused(self) -> None:
-        with pytest.raises(InvalidSearchRequest) as refused:
-            SearchRequest(dataset="   ", n=1)
-        assert "name a dataset" in str(refused.value)
 
     def test_a_negative_population_floor_is_refused(self) -> None:
         with pytest.raises(InvalidSearchRequest):
@@ -122,11 +157,11 @@ class TestOpeningASearch:
             dump_row(2, "aleha", 41.0, -101.0, population=80_000),
             dump_row(3, "aloha", 42.0, -102.0, population=10),
         ]
-        dump = write_dump(tmp_path / "cities6.txt", rows)
-        request = SearchRequest(dataset=str(dump), n=1)
+        database = place_database(tmp_path / "places.sqlite3", rows)
+        request = SearchRequest(database=database, n=1)
 
-        without_a_floor = pairs_of(request, tmp_path)
-        with_a_floor = pairs_of(SearchRequest(dataset=str(dump), n=1, min_population=1_000), tmp_path)
+        without_a_floor = pairs_of(request)
+        with_a_floor = pairs_of(SearchRequest(database=database, n=1, min_population=1_000))
 
         assert [name for first, second, _ in without_a_floor for name in (first, second)].count(
             "aloha"
@@ -139,72 +174,193 @@ class TestOpeningASearch:
     def test_a_full_comparison_reports_the_same_pairs_in_the_same_order(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        with_prefilter = pairs_of(SearchRequest(dataset=str(dump), n=1), tmp_path)
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        with_prefilter = pairs_of(SearchRequest(database=database, n=1))
         without_prefilter = pairs_of(
-            SearchRequest(dataset=str(dump), n=1, equal_length_prefilter=False), tmp_path
+            SearchRequest(database=database, n=1, equal_length_prefilter=False)
         )
         assert with_prefilter == without_prefilter
 
-    def test_the_same_request_can_be_searched_from_the_imported_cache(self, tmp_path: Path) -> None:
-        """One request, two sources.
+    def test_the_dataset_choice_narrows_what_is_searched(self, tmp_path: Path) -> None:
+        """A dataset is a filter, not a label: it changes which pairs are compared.
 
-        The cache walks its candidates by population, so a pair can come out with its places
-        the other way round from the dump's file order. Which place is `first` is the
-        candidate order, not a different pair: the set of pairs and the distances match.
+        The fixture holds two matching pairs. One sits above 50,000 people and one below, so a
+        search that chooses `cities of 50,000 or more people` reports one of them - which is what
+        `cities50000.txt` would have been, now that the dumps are one table.
         """
-        dump = write_dump(
-            tmp_path / "cities7.txt",
-            [
-                dump_row(21, "alpha", 40.0, -100.0, population=90_000),
-                dump_row(22, "aleha", 41.0, -101.0, population=80_000),
-                dump_row(23, "brant", 43.0, -103.0, population=60_000),
-            ],
-        )
-        database = import_dump(tmp_path / "places.sqlite3", dump)
-        database.close()
+        database = mixed_length_database(tmp_path / "places.sqlite3")
+        everything = pairs_of(SearchRequest(database=database, n=1))
+        at_50_000 = SearchRequest(database=database, n=1, dataset="50000")
 
-        from_the_dump = pairs_of(SearchRequest(dataset=str(dump), n=1), tmp_path)
-        session = open_search(
-            SearchRequest(dataset=str(dump), n=1, database=tmp_path / "places.sqlite3"),
-            data_dir=tmp_path,
-        )
-        from_the_cache = [
-            (m.first.asciiname, m.second.asciiname, m.distance_km) for m in session.pairs
-        ]
+        assert {frozenset(pair[:2]) for pair in everything} == {
+            frozenset(("abel", "abed")),
+            frozenset(("tabs", "tobs")),
+            frozenset(("tar", "tor")),
+        }
+        assert {frozenset(pair[:2]) for pair in pairs_of(at_50_000)} == {
+            frozenset(("abel", "abed"))
+        }, "choosing a dataset left a pair from below it in the results"
 
-        assert session.source == "database"
-        from_cache = sorted(
-            (tuple(sorted((first, second))), round(distance, 9))
-            for first, second, distance in from_the_cache
+        session = open_search(at_50_000)
+        everything_session = open_search(SearchRequest(database=database, n=1))
+        assert session.stats.places == 5, "five of the nine places have 50,000 people or more"
+        assert session.stats.dataset_threshold == 50_000
+        assert session.stats.candidate_pairs < everything_session.stats.candidate_pairs, (
+            "the dataset did not reduce the work"
         )
-        from_dump = sorted(
-            (tuple(sorted((first, second))), round(distance, 9))
-            for first, second, distance in from_the_dump
-        )
-        assert from_cache == from_dump, (
-            "the cache and the dump disagree about which pairs match, or how far apart they "
-            f"are: {from_cache} against {from_dump}"
-        )
-        assert session.stats.places == 3
 
-    def test_a_cache_with_no_places_in_it_is_refused_by_name(self, tmp_path: Path) -> None:
+    def test_the_choices_are_built_from_the_data_and_each_searches_different_places(
+        self, tmp_path: Path
+    ) -> None:
+        """The dropdown is read out of the cache, and a choice that changes nothing is no choice.
+
+        `cities of 1,000 or more people` is the interesting row: the places here are on both
+        sides of every threshold, so all four rules mean different searches, and the whole cache
+        is listed by what it is rather than by how many rows it happens to hold today.
+        """
+        database = spread_database(tmp_path / "places.sqlite3")
+        connection = connect(database)
+        try:
+            options = dataset_options(connection)
+        finally:
+            connection.close()
+
+        assert [option.threshold for option in options] == [None, 1_000, 5_000, 15_000]
+        assert [option.label for option in options] == [
+            "every place in the database",
+            "cities of 1,000 or more people",
+            "cities of 5,000 or more people",
+            "cities of 15,000 or more people",
+        ], "a dataset is worded as a rule about people, never as a bare number or a file name"
+        assert [option.places for option in options] == [8, 5, 4, 2]
+        assert len({option.candidate_pairs for option in options}) == len(options), (
+            "every choice on the list has to be a different amount of work"
+        )
+
+    def test_the_words_of_a_choice_are_the_rule_the_search_runs(self, tmp_path: Path) -> None:
+        """A label that drifts from its threshold is a lie in a dropdown.
+
+        Each choice is checked against a search made with that number: the digits in the words
+        are the threshold the filter ran at, the words the search reports back are the words in
+        the list, and no choice is a bare number, a file name, or a count that will go stale.
+        """
+        database = spread_database(tmp_path / "places.sqlite3")
+        connection = connect(database)
+        try:
+            options = dataset_options(connection)
+        finally:
+            connection.close()
+
+        assert options, "a cache with places in it offers something"
+        for option in options:
+            if option.threshold is None:
+                assert option.label == WHOLE_DATABASE_LABEL
+                continue
+            assert f"{option.threshold:,}" in option.label, (
+                f"the words lost the rule, or moved off it: {option.label!r} is not {option.threshold:,}"
+            )
+            assert option.label != str(option.threshold), f"a bare number is not a label: {option.label}"
+            assert f"cities{option.threshold}" not in option.label.replace(",", ""), (
+                f"a dataset is not a file name: {option.label}"
+            )
+
+            session = open_search(
+                SearchRequest(database=database, n=1, dataset=str(option.threshold))
+            )
+            assert session.stats.dataset_threshold == option.threshold, (
+                "the number in the words is not the number the search filtered on"
+            )
+            assert session.stats.dataset_label == option.label, (
+                "the dropdown and the running search describe the same rule in different words"
+            )
+
+    def test_a_choice_that_would_search_the_same_places_as_another_is_not_offered(
+        self, tmp_path: Path
+    ) -> None:
+        """A cache imported from `cities1000` alone has one dataset: everything in it.
+
+        Every place in that dump has 1,000 people or more, so `cities of 1,000 or more people`
+        would be the whole cache wearing a number, and every place here is a city of 40,000 or
+        more, so the bigger thresholds hold the same places too.
+        """
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        connection = connect(database)
+        try:
+            options = dataset_options(connection)
+        finally:
+            connection.close()
+
+        assert [option.threshold for option in options] == [None]
+        assert [option.label for option in options] == ["every place in the database"]
+
+    def test_a_higher_threshold_searches_fewer_places_and_finds_fewer_pairs(
+        self, tmp_path: Path
+    ) -> None:
+        database = spread_database(tmp_path / "places.sqlite3")
+
+        found: dict[str | None, int] = {}
+        costs: dict[str | None, int] = {}
+        for threshold in (None, "1000", "5000", "15000"):
+            session = open_search(SearchRequest(database=database, n=1, dataset=threshold))
+            costs[threshold] = session.stats.candidate_pairs
+            found[threshold] = len(list(session.pairs))
+
+        assert [found[key] for key in (None, "1000", "5000", "15000")] == [3, 2, 2, 1], (
+            "a dataset is a filter on the answers, not a label on the same ones: the villages "
+            "are out above 1,000 and only the big city pair survives 15,000"
+        )
+        assert costs[None] > costs["1000"] > costs["5000"] > costs["15000"], (
+            f"the work did not fall with the places: {costs}"
+        )
+
+    def test_the_dataset_and_the_population_floor_together_mean_the_stricter(
+        self, tmp_path: Path
+    ) -> None:
+        """Both are floors on candidate population, so a request giving both gets the higher.
+
+        Neither is quietly dropped: a 60,000 dataset with a 40,000 floor is still 60,000, and a
+        70,000 floor under a 60,000 dataset is 70,000.
+        """
+        database = mixed_length_database(tmp_path / "places.sqlite3")
+        dataset_only = open_search(SearchRequest(database=database, n=1, dataset="60000"))
+        lower_floor = open_search(
+            SearchRequest(database=database, n=1, dataset="60000", min_population=40_000)
+        )
+        higher_floor = open_search(
+            SearchRequest(database=database, n=1, dataset="60000", min_population=70_000)
+        )
+
+        assert dataset_only.stats.places == lower_floor.stats.places == 4
+        assert higher_floor.stats.places == 3
+
+    def test_a_database_with_no_places_in_it_is_refused_by_name(self, tmp_path: Path) -> None:
         empty = tmp_path / "places.sqlite3"
-        sqlite3.connect(str(empty)).close()
+        connect(empty).close()
 
         with pytest.raises(CacheNotImportedError) as refused:
-            open_search(
-                SearchRequest(dataset="anything", n=1, database=empty), data_dir=tmp_path
-            )
+            open_search(SearchRequest(n=1, database=empty))
         assert "distnsimilarity-import" in str(refused.value), (
             "the refusal has to say what to do about it"
         )
+        assert "only search source" in str(refused.value), (
+            "and it has to say there is nothing else to fall back to"
+        )
+
+    def test_a_database_that_is_not_there_is_refused_rather_than_searched_around(
+        self, tmp_path: Path
+    ) -> None:
+        """A wrong path is a wrong path: the answer is the import command, not other data."""
+        missing = tmp_path / "nowhere" / "places.sqlite3"
+
+        with pytest.raises(CacheNotImportedError) as refused:
+            open_search(SearchRequest(n=1, database=missing))
+        assert str(missing) in str(refused.value)
 
 
 class TestStoppingASearch:
     def test_a_search_that_is_left_alone_reports_everything_it_found(self, tmp_path: Path) -> None:
-        dump = noisy_dump(tmp_path / "cities8.txt", places=300)
-        session = open_search(SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE))
+        database = noisy_database(tmp_path / "places.sqlite3", places=300)
+        session = open_search(SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE))
         pairs = list(session.pairs)
 
         assert session.stats.completed is True
@@ -215,8 +371,8 @@ class TestStoppingASearch:
         assert session.stats.comparison_polls > 0, "the scan polled its cancellation check"
 
     def test_a_reader_that_stops_gets_exactly_the_pairs_before_that_point(self, tmp_path: Path) -> None:
-        dump = noisy_dump(tmp_path / "cities8.txt", places=1_500)
-        request = SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE)
+        database = noisy_database(tmp_path / "places.sqlite3", places=1_500)
+        request = SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE)
         whole = pairs_of(request)
 
         session = open_search(request)
@@ -240,8 +396,8 @@ class TestStoppingASearch:
     def test_the_scan_stops_at_the_cancellation_rather_than_running_on(
         self, tmp_path: Path
     ) -> None:
-        dump = noisy_dump(tmp_path / "cities8.txt", places=1_500)
-        request = SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE)
+        database = noisy_database(tmp_path / "places.sqlite3", places=1_500)
+        request = SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE)
 
         full = open_search(request)
         list(full.pairs)
@@ -258,8 +414,8 @@ class TestStoppingASearch:
     def test_a_search_cancelled_before_the_first_pair_reports_nothing(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        session = open_search(SearchRequest(dataset=str(dump), n=1))
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        session = open_search(SearchRequest(database=database, n=1))
         session.control.cancel("nobody wanted the results")
 
         assert list(session.pairs) == []
@@ -269,8 +425,8 @@ class TestStoppingASearch:
     def test_cancelling_a_search_that_is_already_over_changes_nothing(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        session = open_search(SearchRequest(dataset=str(dump), n=1))
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        session = open_search(SearchRequest(database=database, n=1))
         pairs = list(session.pairs)
         session.control.cancel("too late")
 
@@ -295,10 +451,10 @@ class TestTheControlIsShared:
     ) -> None:
         """This is how an adapter stops a search it did not start: the command line's Ctrl-C
         handler, and later a control endpoint, both work this way."""
-        dump = noisy_dump(tmp_path / "cities8.txt", places=1_500)
+        database = noisy_database(tmp_path / "places.sqlite3", places=1_500)
         control = SearchControl(poll_every_comparisons=256)
         session = open_search(
-            SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE), control=control
+            SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE), control=control
         )
         next(session.pairs)
         control.cancel("stopped from outside")
@@ -309,10 +465,10 @@ class TestTheControlIsShared:
     def test_a_scan_polls_its_check_once_per_poll_interval(self, tmp_path: Path) -> None:
         """The poll interval is the difference between stopping in a millisecond and stopping
         after the next few million comparisons, so its arithmetic is pinned here."""
-        dump = noisy_dump(tmp_path / "cities8.txt", places=400)
+        database = noisy_database(tmp_path / "places.sqlite3", places=400)
         control = SearchControl(poll_every_comparisons=64)
         session = open_search(
-            SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE), control=control
+            SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE), control=control
         )
         list(session.pairs)
 
@@ -341,10 +497,10 @@ class TestPacingASearch:
     def test_a_held_search_makes_no_more_comparisons_until_the_driver_lets_it_go(
         self, tmp_path: Path
     ) -> None:
-        dump = noisy_dump(tmp_path / "cities8.txt", places=600)
+        database = noisy_database(tmp_path / "places.sqlite3", places=600)
         control = SearchControl(poll_every_comparisons=64)
         session = open_search(
-            SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE), control=control
+            SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE), control=control
         )
         held = threading.Event()
         let_go = threading.Event()
@@ -388,10 +544,10 @@ class TestPacingASearch:
     ) -> None:
         """A driver that hangs up never comes back for the next slice, so waiting for it would
         be a search that runs forever rather than one that stops."""
-        dump = noisy_dump(tmp_path / "cities8.txt", places=600)
+        database = noisy_database(tmp_path / "places.sqlite3", places=600)
         control = SearchControl(poll_every_comparisons=64)
         session = open_search(
-            SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE), control=control
+            SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE), control=control
         )
         held = threading.Event()
 
@@ -416,7 +572,31 @@ class TestPacingASearch:
         assert session.stats.completed is False
 
 
-def mixed_length_dump(path: Path) -> Path:
+def spread_database(path: Path) -> Path:
+    """Seven places spread across the dataset thresholds, with a matching pair on each shelf.
+
+    Each pair sits at one size - both halves of a pair are the same kind of place - so raising
+    the threshold takes whole pairs out of the search: three pairs in the whole cache, two above
+    1,000, two above 5,000, one above 15,000. `village` sits between 1,000 and 5,000, the villages
+    below 1,000 and `hamlet` below everything, so that each of the four choices covers a different
+    number of places and none of the extras matches anything at n=1.
+    """
+    return place_database(
+        path,
+        [
+            dump_row(41, "abelard", 44.0, -93.0, population=20_000),
+            dump_row(42, "abelurd", 39.0, -89.0, population=19_000),
+            dump_row(43, "toronto", 40.0, -90.0, population=8_000),
+            dump_row(44, "taronto", 41.0, -91.0, population=7_000),
+            dump_row(48, "village", 45.0, -95.0, population=3_000),
+            dump_row(45, "brant", 42.0, -92.0, population=900),
+            dump_row(46, "brand", 43.0, -93.0, population=800),
+            dump_row(47, "hamlet", 44.0, -94.0, population=500),
+        ],
+    )
+
+
+def mixed_length_database(path: Path) -> Path:
     """Nine places in three name lengths, so the length groups have something to skip."""
     rows = [
         dump_row(21, "abel", 10.0, 20.0, population=90_000),
@@ -429,7 +609,7 @@ def mixed_length_dump(path: Path) -> Path:
         dump_row(28, "tabs", 17.0, 27.0, population=20_000),
         dump_row(29, "tobs", 18.0, 28.0, population=10_000),
     ]
-    return write_dump(path, rows)
+    return place_database(path, rows)
 
 
 class TestWhatTheSearchIsAboutToDo:
@@ -438,8 +618,8 @@ class TestWhatTheSearchIsAboutToDo:
     def test_a_search_counts_its_candidate_pairs_before_comparing_any_of_them(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        session = open_search(SearchRequest(dataset=str(dump), n=1), data_dir=tmp_path)
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        session = open_search(SearchRequest(database=database, n=1))
 
         assert session.stats.candidate_pairs == 21, "six places, each against itself and later"
         assert session.stats.pairs_compared == 0, "counting the job is not doing it"
@@ -451,11 +631,10 @@ class TestWhatTheSearchIsAboutToDo:
         self, tmp_path: Path, prefilter: bool, expected: int
     ) -> None:
         """The estimate and the work are counted by one rule, or a progress bar lies."""
-        dump = mixed_length_dump(tmp_path / "cities9.txt")
+        database = mixed_length_database(tmp_path / "places.sqlite3")
         session = open_search(
-            SearchRequest(dataset=str(dump), n=1, equal_length_prefilter=prefilter),
-            data_dir=tmp_path,
-        )
+            SearchRequest(database=database, n=1, equal_length_prefilter=prefilter),
+                    )
         list(session.pairs)
 
         assert session.stats.candidate_pairs == expected
@@ -465,12 +644,11 @@ class TestWhatTheSearchIsAboutToDo:
     def test_the_length_groups_reduce_the_work_without_reducing_the_pairs(
         self, tmp_path: Path
     ) -> None:
-        dump = mixed_length_dump(tmp_path / "cities9.txt")
-        grouped = open_search(SearchRequest(dataset=str(dump), n=1), data_dir=tmp_path)
+        database = mixed_length_database(tmp_path / "places.sqlite3")
+        grouped = open_search(SearchRequest(database=database, n=1))
         everything = open_search(
-            SearchRequest(dataset=str(dump), n=1, equal_length_prefilter=False),
-            data_dir=tmp_path,
-        )
+            SearchRequest(database=database, n=1, equal_length_prefilter=False),
+                    )
 
         assert grouped.stats.candidate_pairs < everything.stats.candidate_pairs == 45
         assert grouped.stats.candidate_pairs == 21, "one 2-letter, four 3, four 4: 1 + 10 + 10"
@@ -478,12 +656,12 @@ class TestWhatTheSearchIsAboutToDo:
     def test_the_population_floor_changes_the_count_of_work_not_the_count_of_answers(
         self, tmp_path: Path
     ) -> None:
-        dump = mixed_length_dump(tmp_path / "cities9.txt")
-        no_floor = SearchRequest(dataset=str(dump), n=1)
-        high_floor = SearchRequest(dataset=str(dump), n=1, min_population=40_000)
+        database = mixed_length_database(tmp_path / "places.sqlite3")
+        no_floor = SearchRequest(database=database, n=1)
+        high_floor = SearchRequest(database=database, n=1, min_population=40_000)
 
-        with_no_floor = open_search(no_floor, data_dir=tmp_path)
-        with_high_floor = open_search(high_floor, data_dir=tmp_path)
+        with_no_floor = open_search(no_floor)
+        with_high_floor = open_search(high_floor)
 
         assert with_no_floor.stats.places == 9
         assert with_high_floor.stats.places == 6
@@ -492,9 +670,9 @@ class TestWhatTheSearchIsAboutToDo:
     def test_a_search_stopped_halfway_reports_a_fraction_of_its_candidates(
         self, tmp_path: Path
     ) -> None:
-        dump = noisy_dump(tmp_path / "cities40.txt", places=400)
+        database = noisy_database(tmp_path / "places.sqlite3", places=400)
         session = open_search(
-            SearchRequest(dataset=str(dump), n=NOISY_CHARACTER_DIFFERENCE),
+            SearchRequest(database=database, n=NOISY_CHARACTER_DIFFERENCE),
             control=SearchControl(poll_every_comparisons=512),
         )
         assert next(session.pairs, None) is not None, "the fixture plants a pair at the head"
@@ -509,9 +687,9 @@ class TestWhatTheSearchIsAboutToDo:
         self, tmp_path: Path
     ) -> None:
         rows = [dump_row(31, "solo", 1.0, 2.0, population=5)]
-        dump = write_dump(tmp_path / "cities1.txt", rows)
+        database = place_database(tmp_path / "places.sqlite3", rows)
         session = open_search(
-            SearchRequest(dataset=str(dump), n=1, min_population=1_000), data_dir=tmp_path
+            SearchRequest(database=database, n=1, min_population=1_000)
         )
         list(session.pairs)
 
@@ -547,8 +725,8 @@ class TestTheCostEstimate:
 
 class TestTheBestSoFar:
     def test_the_default_best_list_is_the_furthest_fifty(self, tmp_path: Path) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        session = open_search(SearchRequest(dataset=str(dump), n=1), data_dir=tmp_path)
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        session = open_search(SearchRequest(database=database, n=1))
         streamed = [matched.distance_km for matched in session.pairs]
 
         assert session.limit == DEFAULT_TOP_K
@@ -565,9 +743,9 @@ class TestTheBestSoFar:
         Nothing about the snapshot sequence depends on timing, so the browser and the core
         cannot drift apart without this test noticing.
         """
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        request = SearchRequest(dataset=str(dump), n=1, top_k=2)
-        session = open_search(request, data_dir=tmp_path)
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        request = SearchRequest(database=database, n=1, top_k=2)
+        session = open_search(request)
 
         seen: list[tuple[float, ...]] = []
         improvements = 0
@@ -576,7 +754,7 @@ class TestTheBestSoFar:
                 improvements = session.stats.improvements
                 seen.append(tuple(ranked.distance_km for ranked in session.snapshot()))
 
-        reference = open_search(request, data_dir=tmp_path)
+        reference = open_search(request)
         expected = [
             tuple(ranked.distance_km for ranked in snapshot)
             for snapshot in snapshots(reference.pairs, limit=2)
@@ -587,26 +765,26 @@ class TestTheBestSoFar:
     def test_a_least_first_request_watches_the_other_end_of_the_range(
         self, tmp_path: Path
     ) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
+        database = two_pair_database(tmp_path / "places.sqlite3")
         session = open_search(
-            SearchRequest(dataset=str(dump), n=1, top_k=1, direction=Ranking.LEAST),
-            data_dir=tmp_path,
-        )
+            SearchRequest(database=database, n=1, top_k=1, direction=Ranking.LEAST),
+                    )
         list(session.pairs)
 
         [ranked] = session.snapshot()
         assert ranked.distance_km == min(
-            pair[2] for pair in pairs_of(SearchRequest(dataset=str(dump), n=1), tmp_path)
+            pair[2] for pair in pairs_of(SearchRequest(database=database, n=1))
         )
 
     def test_a_ranked_pair_carries_what_a_result_row_needs(self, tmp_path: Path) -> None:
-        dump = two_pair_dump(tmp_path / "cities6.txt")
-        session = open_search(SearchRequest(dataset=str(dump), n=1, top_k=1), data_dir=tmp_path)
+        database = two_pair_database(tmp_path / "places.sqlite3")
+        session = open_search(SearchRequest(database=database, n=1, top_k=1))
         list(session.pairs)
 
         [ranked] = session.snapshot()
-        assert (ranked.first.asciiname, ranked.second.asciiname) == ("alpha", "aloha"), (
-            "the fixture's furthest pair"
+        assert (ranked.first.asciiname, ranked.second.asciiname) == ("aloha", "alpha"), (
+            "the fixture's furthest pair, and the database's candidate order: population "
+            "ascending, so the smaller city is `first`"
         )
         assert ranked.first.country_code and ranked.second.country_code
         assert ranked.first.population and ranked.second.population
@@ -621,6 +799,6 @@ class TestTheBestSoFar:
         self, tmp_path: Path, bad: dict[str, object]
     ) -> None:
         """A refused request is an exception a caller can report, never a stream of nothing."""
-        dump = two_pair_dump(tmp_path / "cities6.txt")
+        database = two_pair_database(tmp_path / "places.sqlite3")
         with pytest.raises(InvalidSearchRequest):
-            open_search(SearchRequest(dataset=str(dump), n=1, **bad), data_dir=tmp_path)  # type: ignore[arg-type]
+            open_search(SearchRequest(database=database, n=1, **bad))  # type: ignore[arg-type]

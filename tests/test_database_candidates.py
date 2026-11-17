@@ -547,6 +547,43 @@ class TestTheRealDatabasesScope:
                 f"{label} walked the table: {plan}"
             )
 
+    def test_the_dataset_filter_needs_no_index_of_its_own(self, imported) -> None:
+        """A dataset is `population >= ?` on the same column a floor is, so the indexes of
+        ADR 0003 already answer it - and nothing filters `source_threshold`, so nothing is
+        indexed on it. Checked on the real 146,782 places, because on a fixture of ten rows
+        the planner table-scans anything and means nothing by it.
+        """
+        from distnsimilarity.db.schema import query_plan
+
+        connection, _ = imported
+        statements = {
+            "walking a name length at a dataset": (
+                "SELECT geonameid FROM place WHERE name_length = ? AND population >= ? "
+                "ORDER BY population, geonameid LIMIT 2000",
+                (8, 5_000),
+            ),
+            "counting the groups a dataset leaves": (
+                "SELECT name_length, COUNT(*) FROM place WHERE population >= ? "
+                "GROUP BY name_length ORDER BY name_length",
+                (5_000,),
+            ),
+            "sizing a dataset choice for the dropdown": (
+                "SELECT COUNT(*) FROM place WHERE population >= ?",
+                (5_000,),
+            ),
+        }
+        for label, (statement, parameters) in statements.items():
+            plan = query_plan(connection, statement, parameters)
+            assert "idx_place" in plan, f"{label} degenerated into a table scan: {plan}"
+            assert "source_threshold" not in plan, (
+                f"{label} was not answered by the population index it is meant to use: {plan}"
+            )
+
+        indexed = [row[1] for row in connection.execute("PRAGMA index_list(place)")]
+        assert [name for name in indexed if "source" in name] == [], (
+            f"nothing filters source_threshold, so nothing should be indexed on it: {indexed}"
+        )
+
     def test_the_scan_of_real_places_agrees_with_the_scan_of_the_dump(
         self, tmp_path: Path
     ) -> None:

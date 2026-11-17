@@ -17,7 +17,7 @@ import pytest
 from distnsimilarity import cli
 from distnsimilarity.core.places import read_places
 from distnsimilarity.core.scan import scan
-from support import dump_row, write_dump
+from support import dump_row, place_database, write_dump
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRUNED = {".git", ".venv", "__pycache__", ".pytest_cache", "node_modules", ".mypy_cache"}
@@ -125,12 +125,12 @@ class TestNothingOutsideATemporaryDirectory:
         rows = [
             dump_row(index, f"Place{index:03d}", index / 100, index / 50) for index in range(1, 51)
         ]
-        dump = write_dump(tmp_path / "cities8.txt", rows)
+        database = place_database(tmp_path / "places.sqlite3", rows)
         output = tmp_path / "results.csv"
 
         before = repository_paths()
         exit_code = cli.main(
-            ["--dataset", str(dump), "--n", "1", "--output", str(output), "--quiet"]
+            ["--database", str(database), "--n", "1", "--output", str(output), "--quiet"]
         )
         after = repository_paths()
 

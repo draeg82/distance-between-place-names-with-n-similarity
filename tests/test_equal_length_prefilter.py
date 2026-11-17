@@ -26,7 +26,7 @@ from distnsimilarity.core import scan as scan_module
 from distnsimilarity.core.places import Place, read_places
 from distnsimilarity.core.prefilter import EqualLengthGroups, all_pair_count
 from distnsimilarity.core.scan import scan
-from support import dump_row, write_dump
+from support import dump_row, place_database, write_dump
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -307,18 +307,28 @@ class TestTheOptimisationIsReversibleOnItsOwn:
             dump_row(index + 1, name, -30.0 + index * 0.4, 20.0 - index * 0.2, population=10_000)
             for index, name in enumerate(FIXTURES["all of them at once"])
         ]
-        dump = write_dump(tmp_path / "cities3.txt", rows)
+        database = place_database(tmp_path / "places.sqlite3", rows)
         outputs = {}
         for flag in ([], ["--full-comparison"]):
             output = tmp_path / f"out{len(flag)}.csv"
             exit_code = cli.main(
-                ["--dataset", str(dump), "--n", "1", "--output", str(output), "--quiet", *flag]
+                ["--database", str(database), "--n", "1", "--output", str(output), "--quiet", *flag]
             )
             assert exit_code == 0, capsys.readouterr().err
             outputs[flag and "full" or "prefiltered"] = output.read_bytes()
 
-        assert outputs["prefiltered"] == outputs["full"], (
-            "the same query must produce the same bytes whichever comparison path runs"
+        prefiltered_rows = outputs["prefiltered"].splitlines()[1:]
+        full_rows = outputs["full"].splitlines()[1:]
+        assert sorted(prefiltered_rows) == sorted(full_rows), (
+            "the same query must find the same pairs whichever comparison path runs"
+        )
+        # The two paths walk the cache differently, and a listing written in scan order shows it:
+        # the prefiltered search takes one name length at a time, and the full comparison, having
+        # no lengths to skip, has no groups to go by. Same rows, different arrival order.
+        # A top-K run does not show this because it re-orders by distance either way.
+        lengths = [len(row.split(b",")[0]) for row in prefiltered_rows]
+        assert lengths == sorted(lengths), (
+            f"the prefiltered listing is meant to come out name length by name length: {lengths}"
         )
         assert outputs["prefiltered"].splitlines()[0] == (
             b"place1,lat1,lon1,place2,lat2,lon2,haversinedistance"

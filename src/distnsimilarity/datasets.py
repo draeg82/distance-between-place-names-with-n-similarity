@@ -108,8 +108,58 @@ def dataset_threshold(request: str | int) -> int:
     )
 
 
+def parse_dataset_threshold(request: str) -> int:
+    """The population threshold a search's dataset request names.
+
+    `dataset_threshold` reads the number; this refuses the spellings that are not a dataset
+    choice: an empty request, which is the whole database rather than a dataset, and a path,
+    which names a file to read and is the import command's business, not a search's.
+    """
+    text = str(request).strip()
+    if not text:
+        raise DatasetNotAvailableError(
+            "an empty dataset is not a dataset: leave the dataset out to search every place in "
+            "the database, or name a threshold (5000)"
+        )
+    if "/" in text or "\\" in text:
+        raise DatasetNotAvailableError(
+            f"{request!r} is a file path: a search chooses a dataset by population threshold "
+            "(5000) or dump name (cities5000.txt), it does not read a file"
+        )
+    try:
+        return dataset_threshold(text)
+    except DatasetNotAvailableError as error:
+        # The parser below is shared with the import command, where "a dump name" is the right
+        # hint; a person choosing a dataset has never heard of a dump, so say it their way.
+        raise DatasetNotAvailableError(
+            f"{request!r} is not a dataset of this tool: name a population threshold (5000), "
+            "or the dump that rule is published as (cities5000), or leave the dataset out to "
+            f"search every place in the database. ({error})"
+        ) from error
+
+
+def dataset_label(threshold: int) -> str:
+    """A population threshold in the words a person chooses it from: "cities of 5,000 or more
+    people".
+
+    Thousands are separated, the number is never the whole label, and the figure has to be the
+    threshold the search filters on - which is what `tests/test_datasets.py` pins, so a
+    label cannot drift from the rule it names.
+    """
+    return f"cities of {int(threshold):,} or more people"
+
+
+#: The words for the choice that filters nothing. One constant, because the dropdown, the
+#: command line and the opening event of a search are describing one thing and must not each
+#: invent a phrase for it.
+WHOLE_DATABASE_LABEL = "every place in the database"
+
+
 def resolve_dataset(request: str, data_dir: Path | None = None) -> Path:
     """Turn a caller-supplied dataset request into a file path.
+
+    This belongs to the importer: a search reads the place database and never a dump, so a
+    request naming a file at search time is refused (`parse_dataset_threshold`).
 
     Accepts a population threshold (``"5000"``), a bare file name
     (``"cities5000.txt"``) or an explicit path. A request without a directory component

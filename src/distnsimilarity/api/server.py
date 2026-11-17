@@ -21,7 +21,6 @@ from distnsimilarity.api.app import DEFAULT_PROGRESS_INTERVAL, create_app
 from distnsimilarity.api.payload import DEFAULT_RESULTS_INTERVAL
 from distnsimilarity.api.registry import SearchRegistry
 from distnsimilarity.api.runner import DEFAULT_SEARCH_WORKERS, DEFAULT_STEP_SECONDS
-from distnsimilarity.datasets import DatasetNotAvailableError, default_data_dir
 from distnsimilarity.db.schema import DEFAULT_DATABASE_NAME
 from distnsimilarity.search import DEFAULT_BATCH_SIZE
 
@@ -64,14 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         default=None,
-        help="Directory holding the GeoNames dumps. Default: the one the CLI finds.",
+        help=(
+            f"Directory holding {DEFAULT_DATABASE_NAME}, on a machine that keeps its cache "
+            "there instead of naming it. Overridden by --database and $DISTNSIMILARITY_DB."
+        ),
     )
     parser.add_argument(
         "--database",
         default=None,
         help=(
-            f"Place cache used for searches with source=database. "
-            f"Default: {DEFAULT_DATABASE_NAME} beside the dumps."
+            f"The place database every search reads. "
+            f"Default: $DISTNSIMILARITY_DB, or {DEFAULT_DATABASE_NAME} beside the dumps."
         ),
     )
     parser.add_argument(
@@ -132,25 +134,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    try:
-        # Where the dumps are is decided once, at startup: a machine with no dataset
-        # directory should fail here rather than on somebody's first request.
-        data_dir = (
-            Path(arguments.data_dir) if arguments.data_dir else default_data_dir()
-        )
-        app = create_app(
-            data_dir=data_dir,
-            database=None if arguments.database is None else Path(arguments.database),
-            search_workers=arguments.search_workers,
-            batch_size=arguments.batch_size,
-            step_seconds=arguments.step_seconds,
-            results_interval=arguments.results_interval,
-            progress_interval=arguments.progress_interval,
-            registry=SearchRegistry(),
-        )
-    except DatasetNotAvailableError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
+    # Which cache to search is decided once, at startup, in the same order the terminal uses:
+    # `--database`, then the cache inside `--data-dir`, then `$DISTNSIMILARITY_DB`, then the
+    # cache beside the dumps. Passing neither flag is what lets the last two be heard, so a
+    # deployment that names its cache in the environment does not have to say it twice.
+    app = create_app(
+        data_dir=None if arguments.data_dir is None else Path(arguments.data_dir),
+        database=None if arguments.database is None else Path(arguments.database),
+        search_workers=arguments.search_workers,
+        batch_size=arguments.batch_size,
+        step_seconds=arguments.step_seconds,
+        results_interval=arguments.results_interval,
+        progress_interval=arguments.progress_interval,
+        registry=SearchRegistry(),
+    )
 
     try:
         listening = bind(arguments.host, arguments.port)

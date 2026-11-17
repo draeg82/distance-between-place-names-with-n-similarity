@@ -44,18 +44,35 @@ _Avoid_: city, location, record
 **Dump**:
 A GeoNames places file: one file per population cut, `cities1000.txt` and so on. The
 number in the name is the cut the file was made at, not a promise about the rows inside it.
-_Avoid_: CSV, table
+An input to the import, and the raw material of a parity proof: no search reads one.
+_Avoid_: CSV, table, search source
 
 **Dataset**:
-The dump a particular search is run over, named by the caller — by threshold, by file name,
-or by path.
-_Avoid_: input, source, default dataset
+How big a place has to be to take part in a search at all. Written as a threshold (`5000`),
+or as the dump that threshold is published as (`cities5000`, `cities5000.txt`); either way
+the search reads the place database and keeps the places with that population or more.
+Leaving it out searches every place in the database - see
+`docs/adr/0007-the-place-database-is-the-only-search-source.md`.
+_Avoid_: input, source, default dataset, file to search
+
+**Dataset choice**:
+One thing a search can be limited to, offered because the places actually in the database
+make it different from every other choice offered. Labelled in words a person can act on —
+"cities of 5,000 or more people" — with the bare number beside the label, never as it.
+_Avoid_: dropdown value, option, dataset list
+
+**Whole database**:
+The dataset choice that applies no rule of its own: every place in the database, whatever
+its population. Reads as "every place in the database", and carries no place count, because
+a label that counts moves every time the cache is imported.
+_Avoid_: all, none, default dataset, 0
 
 **Population floor**:
 The least population a place may have to take part in a comparison at all. A place sitting
 exactly on the floor takes part. A floor and a dump threshold are the same number and mean
 the same thing, though a floor is not the same set of rows as the dump of that name - the
-floor reads populations, the dump reads a file.
+floor reads populations, the dump reads a file. A dataset choice is a floor too, so a search
+given both runs at whichever of the two is stricter, and neither one trims the results.
 _Avoid_: filter, minimum population of a result
 
 **Candidate set**:
@@ -65,14 +82,17 @@ _Avoid_: filtered results
 
 **Place database**:
 The single generated table of places, deduplicated by GeoNames id, that replaces choosing
-between dumps. Built from the dumps by an import command, git-ignored, and throwaway.
+between dumps. Built from the dumps by an import command, git-ignored, and throwaway. The
+only thing a search reads: a search that cannot open it says so instead of searching
+something else.
 _Avoid_: cache, index, data file
 
 **Source threshold**:
 On a place: the smallest population threshold whose dump contained it. It records which
 dumps were available to the import, not which dumps exist - importing a subset records the
-smallest of those.
-_Avoid_: origin, provenance, imported from
+smallest of those. Provenance only: a dataset choice filters populations, so a place imported
+from a wider dump still answers a narrower dataset.
+_Avoid_: origin, provenance, imported from, dataset
 
 **Name-length group**:
 The candidates whose ASCII names hold one number of characters. Matching needs equal lengths,
@@ -101,8 +121,9 @@ they are found rather than at the end.
 _Avoid_: query, run, job
 
 **Result**:
-The pairs a scan reported, in the order the candidates were walked: dump order for a dump
-scan, name-length group then increasing population for a database scan.
+The pairs a scan reported, in the order the candidates were walked: name-length group then
+increasing population for a search of the place database. A dump's file order survives only
+where a parity proof reads a dump, which is not a search.
 _Avoid_: output, answer
 
 **Great-circle distance**:

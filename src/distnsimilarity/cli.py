@@ -1,4 +1,4 @@
-"""The command-line adapter: a headless search over one GeoNames dump.
+"""The command-line adapter: a headless search over the place database.
 
 This is an adapter, not the seam: everything it does is available by calling
 ``distnsimilarity.search.open_search``, and that is what both this and the HTTP API use.
@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from distnsimilarity.core.places import PlaceRowError
 from distnsimilarity.datasets import DatasetNotAvailableError
+from distnsimilarity.db.schema import DEFAULT_DATABASE_NAME, DatabaseSchemaError
 from distnsimilarity.export.csv_export import LegacyCsvWriter
 from distnsimilarity.search import (
     CacheNotImportedError,
@@ -44,10 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset",
-        required=True,
+        default=None,
         help=(
-            "Population threshold (15000), dump file name (cities15000.txt) or path. "
-            "No default: the caller always says which data to read."
+            "Dataset to search: a population threshold (15000) or the dump name it is named "
+            "after (cities15000.txt), meaning 'cities of 15,000 or more people'. Omit it to "
+            "search every place in the database."
         ),
     )
     parser.add_argument(
@@ -73,8 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Search the imported place cache at this path instead of reading the dump. "
-            "The dataset is still required: it says what the search covers."
+            "The place database to search, at this path. Default: $DISTNSIMILARITY_DB, or "
+            f"{DEFAULT_DATABASE_NAME} beside the dumps, which is where "
+            "distnsimilarity-import writes it."
         ),
     )
     parser.add_argument(
@@ -82,8 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Compare every place against every later place instead of only places whose "
-            "ASCII name is the same length. Same pairs, same order, same CSV; much slower. "
-            "Useful for checking the prefilter against itself."
+            "ASCII name is the same length. Same pairs and the same rows, much slower: the "
+            "fast path reports one name length at a time, so only the order a listing arrives "
+            "in differs. Useful for checking the prefilter against itself."
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress the progress display.")
@@ -120,8 +124,8 @@ def main(argv: Sequence[str] | None = None, *, control: SearchControl | None = N
     arguments = build_parser().parse_args(argv)
     try:
         request = SearchRequest(
-            dataset=arguments.dataset,
             n=arguments.n,
+            dataset=arguments.dataset,
             min_population=arguments.min_population,
             equal_length_prefilter=not arguments.full_comparison,
             database=arguments.database,
@@ -133,7 +137,12 @@ def main(argv: Sequence[str] | None = None, *, control: SearchControl | None = N
     search_control = SearchControl() if control is None else control
     try:
         session = open_search(request, control=search_control)
-    except (DatasetNotAvailableError, PlaceRowError, CacheNotImportedError) as error:
+    except (
+        DatasetNotAvailableError,
+        PlaceRowError,
+        CacheNotImportedError,
+        DatabaseSchemaError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
@@ -160,9 +169,16 @@ def main(argv: Sequence[str] | None = None, *, control: SearchControl | None = N
         )
         return EXIT_CANCELLED
 
+    # The dataset words are what the person chose; a stricter floor is what the count beside
+    # them was taken at, so the line says both rather than letting two places sit under
+    # "cities of 5,000 or more people" and look like a filter that misfired.
+    floor = ""
+    if request.min_population is not None and stats.population_floor != request.dataset_threshold:
+        floor = f", at a population floor of {stats.population_floor:,}"
+
     print(
-        f"{pairs} pair(s) at n={arguments.n} from {session.name} "
-        f"({stats.places} places) written to {arguments.output}"
+        f"{pairs} pair(s) at n={arguments.n} from {session.name}{floor} "
+        f"({stats.places} places in {session.database_path}) written to {arguments.output}"
     )
     return 0
 

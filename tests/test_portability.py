@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from support import dump_row, write_dump
+from support import dump_row, place_database, write_dump
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SUFFIXES = {".py", ".toml", ".md", ".cfg", ".ini", ".json", ".ts", ".tsx", ".html", ".sh", ".yml", ".yaml"}
@@ -148,8 +148,8 @@ class TestOwnedEnvironment:
             (shadow / name).write_text("#!/bin/sh\nexit 77\n", encoding="utf-8")
             os.chmod(shadow / name, 0o755)
 
-        dump = write_dump(
-            tmp_path / "cities9.txt",
+        database = place_database(
+            tmp_path / "places.sqlite3",
             [dump_row(1, "Analac", 0.0, 0.0), dump_row(2, "Bnalac", 0.0, 1.0)],
         )
         output = tmp_path / "out.csv"
@@ -157,7 +157,7 @@ class TestOwnedEnvironment:
 
         result = subprocess.run(
             ["uv", "run", "--project", str(REPO_ROOT), "distnsimilarity-search",
-             "--dataset", str(dump), "--n", "1", "--output", str(output), "--quiet"],
+             "--database", str(database), "--n", "1", "--output", str(output), "--quiet"],
             cwd=tmp_path,
             env=environment,
             capture_output=True,

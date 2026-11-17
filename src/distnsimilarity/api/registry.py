@@ -28,8 +28,6 @@ class SearchRecord:
 
     search_id: str
     request: dict[str, object]
-    source: str
-    dataset: str
     started_at: float
     stats: SearchStats
     live: bool = True
@@ -63,8 +61,6 @@ class SearchRecord:
         return {
             "search_id": self.search_id,
             "live": self.live,
-            "source": self.source,
-            "dataset": self.dataset,
             "request": dict(self.request),
             "seconds": self.seconds,
             **self.stats.as_dict(),
@@ -105,8 +101,6 @@ class SearchRegistry:
             record = SearchRecord(
                 search_id=new_search_id(),
                 request=dict(request),
-                source=session.source,
-                dataset=session.name,
                 started_at=time.time(),
                 stats=session.stats,
             )

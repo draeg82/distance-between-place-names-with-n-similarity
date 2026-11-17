@@ -74,25 +74,23 @@ def ndjson_line(payload: dict[str, Any]) -> str:
 def started_line(
     *,
     search_id: str,
-    dataset: str,
-    source: str,
     request: dict[str, Any],
     stats: dict[str, Any],
     estimate: dict[str, Any],
 ) -> str:
     """The event before the first pair: what is about to be searched, and what it will cost.
 
-    `dataset` is what the search resolved to (a dump name, or the place cache) while
-    `request.requested_dataset` is what the client asked for; they differ for the four-digit
-    shorthand and for a cache-backed search.
+    `request` is the echo of what the caller asked for, with what it resolved to: `dataset` is
+    the population threshold the search filters on (null for every place in the database),
+    `dataset_label` the words for it, and `database` the cache the places will be read from - so
+    a client about to watch a long scan knows which cache it is reading. `requested_dataset` is
+    the spelling the caller sent, which is often just the digits.
     """
     return ndjson_line(
         {
             "type": "started",
             "search_id": search_id,
             **request,
-            "dataset": dataset,
-            "source": source,
             "places": stats["places"],
             "population_floor": stats["population_floor"],
             "candidate_pairs": stats["candidate_pairs"],

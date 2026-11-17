@@ -1,9 +1,12 @@
-"""Watching a search from a terminal: `distnsimilarity-watch --dataset 15000 --n 1`.
+"""Watching a search from a terminal: `distnsimilarity-watch --dataset 5000 --n 1`.
 
 A client of the HTTP API and nothing else. It starts a search, prints what it will cost, and
 then prints the top-K again every time the server sends an improved list - which is the same
 question the browser asks of the same stream, answered with text so that a person with a
 terminal, and a test, can check the streaming works without either.
+
+It chooses no dataset unless it is asked to: with no `--dataset` the server searches every
+place in its own database, which is the question one asks most.
 
 It ranks nothing, sorts nothing and filters nothing: the order it prints is the order the
 `results` events arrived in, because the ranking is the core's and this is not the place for a
@@ -53,7 +56,7 @@ def describe_started(event: dict[str, Any]) -> str:
     )
     return "\n".join(
         [
-            f"search {event['search_id']}: {event['dataset']} at n={event['n']}, "
+            f"search {event['search_id']}: {event['dataset_label']} at n={event['n']}, "
             f"{event['places']:,} places at population >= {event['population_floor']:,}",
             f"  {event['candidate_pairs']:,} pairs to compare - {cost}",
             f"  keeping the {event['top_k']} {event['direction']} distances",
@@ -153,12 +156,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=f"http://{DEFAULT_HOST}:{DEFAULT_PORT}",
         help="Server to watch. Default: %(default)s.",
     )
-    parser.add_argument("--dataset", required=True, help="Threshold, dump name or path.")
+    parser.add_argument(
+        "--dataset",
+        type=int,
+        default=None,
+        help=(
+            "Population threshold to search, e.g. 5000 for cities of 5,000 or more people. "
+            "Omit it to search every place in the server's database."
+        ),
+    )
     parser.add_argument("--n", type=int, required=True, help="Differing character positions.")
     parser.add_argument("--min-population", type=int, default=None, help="Population floor.")
-    parser.add_argument(
-        "--source", choices=("dump", "database"), default="dump", help="Where the places come from."
-    )
     parser.add_argument(
         "--full-comparison",
         action="store_true",
@@ -202,7 +210,6 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int
             "n": arguments.n,
             "min_population": arguments.min_population,
             "full_comparison": arguments.full_comparison,
-            "source": arguments.source,
             "top_k": arguments.top_k,
             "direction": arguments.direction,
         }.items()

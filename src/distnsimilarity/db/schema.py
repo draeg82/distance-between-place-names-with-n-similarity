@@ -7,14 +7,20 @@ never committed. One row per GeoNames id: the three committed dumps contain each
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Sequence
 
-from distnsimilarity.core.places import Place
+from distnsimilarity.core.distance import out_of_range_coordinate
+from distnsimilarity.core.places import Place, PlaceRowError
 from distnsimilarity.datasets import default_data_dir
 
 DEFAULT_DATABASE_NAME = "places.sqlite3"
+
+#: Where the place database is when nobody named one. One variable for the command line, the
+#: server and the watcher, so a cache on another disk is set once rather than typed per call.
+DATABASE_PATH_ENVIRONMENT_VARIABLE = "DISTNSIMILARITY_DB"
 
 #: Bump when the shape below changes; a database from a newer version is refused rather
 #: than misread.
@@ -87,11 +93,14 @@ class DatabaseNotImportedError(RuntimeError):
 
 
 def default_database_path(data_dir: Path | None = None) -> Path:
-    """``places.sqlite3`` beside the dumps, unless told otherwise.
+    """The place database a search reads when nothing named one.
 
-    The dumps directory is found the same way the CLI finds a dataset, so this never
-    resolves against a home directory.
+    ``DISTNSIMILARITY_DB`` wins. Otherwise ``places.sqlite3`` beside the dumps, found the same
+    way the CLI finds a dataset, so this never resolves against a home directory.
     """
+    override = os.environ.get(DATABASE_PATH_ENVIRONMENT_VARIABLE)
+    if override:
+        return Path(override).expanduser().resolve()
     return (default_data_dir() if data_dir is None else data_dir) / DEFAULT_DATABASE_NAME
 
 
@@ -105,7 +114,11 @@ def connect(path: Path | str) -> sqlite3.Connection:
     """
     database = Path(path).expanduser()
     database.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(str(database))
+    # `check_same_thread=False`: a search is opened on one thread and driven on another - the
+    # HTTP server counts the candidates on its accept path and scans on a worker - and one
+    # search has exactly one driver at a time, which is the guarantee that guard exists to
+    # protect. Leaving it on would refuse a search that is legitimately handed over.
+    connection = sqlite3.connect(str(database), check_same_thread=False)
     # A read-mostly database that the search API can read while a scan is running.
     connection.execute("PRAGMA journal_mode=WAL")
     connection.row_factory = sqlite3.Row
@@ -151,16 +164,32 @@ def place_values(place: Place, source_threshold: int) -> tuple[object, ...]:
 
 
 def row_to_place(row: sqlite3.Row) -> Place:
-    """A row from the place table, as a core `Place`."""
-    return Place(
-        geonameid=int(row["geonameid"]),
-        asciiname=str(row["asciiname"]),
-        display_name=str(row["display_name"]),
-        latitude=float(row["latitude"]),
-        longitude=float(row["longitude"]),
-        population=int(row["population"]),
-        country_code=str(row["country_code"]),
-    )
+    """A row from the place table, as a core `Place`.
+
+    A row that will not make a place is a corrupt cache rather than a bad request, and it is
+    named by its GeoNames id: a search that dies 18,000 rows into a table saying only "latitude
+    out of range" leaves a person to find the row by hand. Coordinates are checked here rather
+    than left to the distance function, which only notices them when a pair is being measured.
+    """
+    try:
+        place = Place(
+            geonameid=int(row["geonameid"]),
+            asciiname=str(row["asciiname"]),
+            display_name=str(row["display_name"]),
+            latitude=float(row["latitude"]),
+            longitude=float(row["longitude"]),
+            population=int(row["population"]),
+            country_code=str(row["country_code"]),
+        )
+    except (TypeError, ValueError) as error:
+        raise PlaceRowError(
+            f"place {row['geonameid']} in the place table is not a place: {error}"
+        ) from error
+    problem = out_of_range_coordinate(place.latitude, place.longitude)
+    if problem is not None:
+        message = f"place {place.geonameid} in the place table is not a place: {problem}"
+        raise PlaceRowError(message)
+    return place
 
 
 def place_count(connection: sqlite3.Connection) -> int:

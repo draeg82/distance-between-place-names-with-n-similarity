@@ -1,8 +1,10 @@
 # DistNSimilarity
 
 Find pairs of places whose ASCII names differ by exactly *n* characters, and how far
-apart they are. Input is a [GeoNames](https://download.geonames.org/export/dump/) places
-dump; the committed dumps are `cities1000.txt`, `cities5000.txt` and `cities15000.txt`.
+apart they are. Every search reads one **place database**, generated from a
+[GeoNames](https://download.geonames.org/export/dump/) places dump; the dumps themselves
+- `cities1000.txt`, `cities5000.txt` and `cities15000.txt` - are the input to that import,
+not something a search reads.
 The number in a dump's name is the population it was cut at, not a guarantee: the
 committed dumps still contain places below it (677 in `cities5000.txt`, 52 in
 `cities15000.txt`), so a population floor is something this tool applies rather than
@@ -22,31 +24,40 @@ command below runs through `uv run`, which uses `.venv`.
 
 ## Run a search from the terminal
 
+Once, before the first search: build the place database from the dumps (see
+[Build the place database](#build-the-place-database)). Then:
+
 ```bash
 uv run distnsimilarity-search --dataset 15000 --n 1 --output /tmp/out.csv
 ```
 
 | Flag | Meaning |
 | --- | --- |
-| `--dataset` | Population threshold (`15000`), file name (`cities15000.txt`) or a path to a dump. Required. |
+| `--dataset` | Optional dataset: a population threshold (`15000`) or the dump it is published as (`cities15000.txt`), both meaning "cities of 15,000 or more people". Omit it to search every place in the database. |
 | `--n` | Character-difference value: pairs match when their equal-length ASCII names differ in exactly this many positions. Required. |
 | `--output` | Where to write the CSV. Required. |
 | `--min-population` | Optional population floor; places below it are never compared. |
-| `--full-comparison` | Compare every place against every later place instead of only places whose ASCII name is the same length. Same pairs, same order, same CSV; far slower. |
+| `--database` | Which place database to search. Default: `$DISTNSIMILARITY_DB`, else `places.sqlite3` beside the dumps. |
+| `--full-comparison` | Compare every place against every later place instead of only places whose ASCII name is the same length. Same pairs, same rows, far slower; only the order a plain listing arrives in differs. |
 
-`--dataset`, `--n` and `--output` are always supplied by the caller: the tool has no
-default input file and no default output location. A dataset request that cannot be
-resolved fails with the request and the list of available datasets.
+`--n` and `--output` are always supplied by the caller: the tool has no default output
+location. The database does have a default, because there is one thing to search: a search
+over a database that has not been imported fails with the `distnsimilarity-import` command
+to run, rather than reading a dump instead. A dataset that names no rule fails with the
+request and the datasets this database can be searched as; a dataset bigger than every
+place in it fails the same way, because "no pairs" would look like an answer.
 
 Output is UTF-8 with `\r\n` record separators, header
 `place1,lat1,lon1,place2,lat2,lon2,haversinedistance`, distances in kilometres.
 
-Two searches over the same dumps produce the same rows in the same order.
+Two searches over the same place database produce the same rows in the same order.
 
 A search only ever compares names of equal length, because the matching rule needs equal
 lengths anyway - on `cities1000.txt` that is 927 million comparisons instead of 10.77
 billion. `--full-comparison` switches the shortcut off; it exists so the shortcut can be
-argued with, and it writes the same bytes. `scripts/benchmark_scan.py` measures it:
+argued with, and it finds the same pairs and writes the same rows. The shortcut walks one
+name length at a time, so a plain listing arrives in a different order with the shortcut
+off - a top-K run is ordered by distance either way. `scripts/benchmark_scan.py` measures it:
 
 ```bash
 uv run python scripts/benchmark_scan.py --dataset 1000 --n 1 --sample 2000 --database
@@ -87,18 +98,19 @@ run adds nothing and changes nothing. A row whose coordinates are off the globe,
 missing a column, is reported on stderr with its file and line number and the command exits
 non-zero; nothing is dropped quietly.
 
-### Searching the database
+### Searching the place database
 
 Candidate generation is a lookup rather than a comparison: a name-length group at a
-population floor is one indexed query, and the pairs come out of the same inner loop a
-dump scan uses.
+population floor is one indexed query, and the pairs come out of the same inner loop the
+original script used. A dataset is a floor too, so `dataset_threshold` and
+`population_floor` are folded into whichever of the two is stricter.
 
 ```python
 from distnsimilarity.db import connect, scan_database, scope_for
 
 database = connect("places.sqlite3")
-print(scope_for(database, 5_000).summary())
-for pair in scan_database(database, character_difference=1, population_floor=5_000):
+print(scope_for(database, dataset_threshold=5_000).summary())
+for pair in scan_database(database, character_difference=1, dataset_threshold=5_000):
     print(pair.first.asciiname, pair.second.asciiname, pair.distance_km)
 ```
 
@@ -125,8 +137,11 @@ name-length group, `(population)` for the counts above, and `(asciiname)` to fin
 name. `tests/test_place_database.py` fails if any of those lookups degenerates into a table
 scan, on a fixture and on the real 146,782 places.
 
-The terminal still reads dumps, so the CSV it writes stays exactly what the original tool
-wrote. The search API and the browser search the database.
+The terminal, the API and the browser all search this table - see
+`docs/adr/0007-the-place-database-is-the-only-search-source.md`. Dumps are still read where
+a proof needs the file itself: `distnsimilarity-import`, `scripts/benchmark_scan.py`, the
+`slow` tests, and the byte-for-byte CSV parity pinned by
+`docs/adr/0005-pair-order-follows-candidate-order.md`.
 
 ## Watch a search over HTTP
 
@@ -134,8 +149,11 @@ The same search, streamed. Start the server and read a search as it happens:
 
 ```bash
 uv run distnsimilarity-serve --data-dir .      # 127.0.0.1:8000
-uv run distnsimilarity-watch --dataset 15000 --n 1
+uv run distnsimilarity-watch --dataset 5000 --n 1
 ```
+
+`--dataset` is optional here too: left out, the watcher searches every place in the
+server's database.
 
 `GET /v1/search` answers newline-delimited JSON, one event per line, while the scan runs:
 
@@ -146,10 +164,10 @@ uv run distnsimilarity-watch --dataset 15000 --n 1
 | `results` | the current best-so-far list: both places, the distance, and how many positions the names differ in |
 | `done` | final counts, elapsed total, and whether the search completed, was cancelled (with a reason, and `retryable: true`) or failed |
 
-Other endpoints: `/healthz` (alive, and how many searches are live), `/v1/datasets` (what can
-be searched, and the state of the place cache), `/v1/estimate` (what a search would cost,
-without searching), and `/v1/searches` plus `/v1/searches/{id}` (what is running now, and the
-last few that ended).
+Other endpoints: `/healthz` (alive, how many searches are live, and the state of the place
+database), `/v1/datasets` (what a search can be limited to, in words, and what each choice
+would cost), `/v1/estimate` (what a search would cost, without searching), and
+`/v1/searches` plus `/v1/searches/{id}` (what is running now, and the last few that ended).
 
 Three things about the stream are deliberate:
 
@@ -176,7 +194,7 @@ uv run pytest
 ```
 
 That is the whole default suite: no network access, no writes outside a temporary
-directory, and none of the committed dumps loaded - 350-odd tests in under a second.
+directory, and none of the committed dumps loaded - 500-odd tests in under a second.
 Tests that do read real data are marked `slow` and excluded; run them with
 `uv run pytest -m slow`. The slow suite imports all three dumps into a temporary database,
 checks the 230,160 → 146,782 deduplication against the real files, and confirms the
@@ -204,6 +222,9 @@ assert great_circle_distance_km(0.0, 0.0, 1.0, 0.0) == 111.1950802335329  # one 
 for match in scan(read_places(Path("cities15000.txt")), 1):
     print(match.first.asciiname, match.second.asciiname, match.distance_km)
 ```
+
+`read_places` is the reader the importer and the parity proofs use; a search of the product
+reads the place database and hands the same `Place` objects to the same `scan`.
 
 The rules are the ones the original script implemented, and they are frozen by
 `tests/test_matching_rules.py`, `tests/test_distance_rules.py` and
@@ -243,10 +264,24 @@ uv sync --extra dev
 
 ## Datasets
 
-The dumps are read from the repository root. `DISTNSIMILARITY_DATA_DIR` overrides that
-location; nothing is ever resolved against a home directory. The generated
-`places.sqlite3` lives beside the dumps unless `--database` says otherwise, and is ignored
-by git.
+A dataset is how big a place has to be to take part in a search, and it is spelled either as
+a threshold (`5000`) or as the dump that threshold is published as (`cities5000`,
+`cities5000.txt`). Searching a dataset never reads that dump: it reads the place database and
+keeps the places at that population or above. So a floor of 5,000 selects the 55,108 places
+in the table with 5,000 or more people, which is close to `cities5000.txt` but not the same
+rows - the rule is about people, not files.
+
+`/v1/datasets` lists the choices this database can actually offer, worded ("cities of 5,000
+or more people", thousands separated), each with its place count and comparison count, plus
+`every place in the database` for a search that applies no rule. A choice that would search
+exactly the places another choice searches is not offered, so a database imported from
+`cities1000.txt` alone offers two choices rather than four impossible ones.
+
+The dumps are read from the repository root by the import command.
+`DISTNSIMILARITY_DATA_DIR` overrides that location; nothing is ever resolved against a home
+directory. The generated `places.sqlite3` lives beside the dumps unless `--database` says
+otherwise, `DISTNSIMILARITY_DB` overrides where a *search* looks for it, and both files are
+ignored by git.
 
 ## Portability
 

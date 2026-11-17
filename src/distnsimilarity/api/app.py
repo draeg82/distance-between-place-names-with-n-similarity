@@ -6,6 +6,10 @@ running. The ranking in those `results` events is the core's own, and its order 
 headless run ranks the same pairs in, so the two adapters are the same search
 (`tests/test_http_search.py` checks that event for event).
 
+Everything is searched out of the place database - there is no `source` to choose, and a request
+that still sends one is refused rather than quietly ignored - and what a caller chooses instead
+is a dataset: a population threshold, listed by `/v1/datasets`.
+
 One scan runs per process at a time, and a second request is refused rather than queued: this
 is a tool for one person's laptop, where a second scan would only make the first one slower and
 the machine louder. The refusal says which search is in the way and how to move it.
@@ -19,12 +23,13 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from distnsimilarity.api.payload import (
@@ -43,13 +48,14 @@ from distnsimilarity.api.runner import (
     SearchPool,
     SearchRunner,
 )
-from distnsimilarity.core.places import PlaceRowError
 from distnsimilarity.core.topk import DEFAULT_TOP_K, parse_direction
-from distnsimilarity.datasets import DatasetNotAvailableError, available_datasets, default_data_dir
+from distnsimilarity.datasets import DatasetNotAvailableError
+from distnsimilarity.db.candidates import dataset_options
 from distnsimilarity.db.schema import (
     DEFAULT_DATABASE_NAME,
     DatabaseNotImportedError,
     DatabaseSchemaError,
+    default_database_path,
 )
 from distnsimilarity.search import (
     DEFAULT_BATCH_SIZE,
@@ -72,16 +78,52 @@ DEFAULT_PROGRESS_INTERVAL = 0.5
 #: as a half-open stream.
 REQUEST_ERRORS: tuple[tuple[tuple[type[BaseException], ...], int, str], ...] = (
     ((InvalidSearchRequest,), 422, "InvalidSearchRequest"),
-    ((PlaceRowError,), 422, "PlaceRowError"),
     ((DatasetNotAvailableError,), 404, "DatasetNotAvailable"),
     ((CacheNotImportedError,), 409, "CacheNotImported"),
     ((DatabaseNotImportedError,), 409, "PlaceDatabaseNotImported"),
     ((DatabaseSchemaError,), 409, "PlaceDatabaseUnusable"),
 )
 
+#: A row in the place table that is not a place (`PlaceRowError`) is deliberately absent: rows are
+#: read while the scan runs, so it can only arrive after `started`, as an `error` event naming the
+#: row. Promising a status code for it would promise a refusal this server cannot make.
+
 #: The two refusals that are about the server's state rather than about the request.
 SEARCH_ALREADY_RUNNING = "SearchAlreadyRunning"
 UNKNOWN_SEARCH = "UnknownSearch"
+
+
+#: The parameter that used to choose between a dump file and the place cache. The database is
+#: the only search source now, so a caller who still sends it is contradicting themselves about
+#: what is being searched; that is refused, where a quietly ignored parameter would leave them
+#: reading places they never asked for.
+REMOVED_PARAMETER = "source"
+
+
+def refusal_for_removed_parameter(sent: Mapping[str, object] | None) -> JSONResponse | None:
+    """The answer to a request that still asks which source to read, or None if it does not.
+
+    `sent` is whatever the caller sent: the query parameters of a GET, or the JSON body of a
+    POST. Both are ways of asking a question this server no longer answers.
+
+    410 rather than 422: the parameter existed, this server stopped serving it, and a client
+    still sending it is speaking an older version of this API. That is a different fix from a
+    malformed request - change which parameter you send - and the code lets a client see the
+    difference without reading the sentence.
+    """
+    if not sent or REMOVED_PARAMETER not in sent:
+        return None
+    return JSONResponse(
+        {
+            "error": "RemovedParameter",
+            "message": (
+                f"{REMOVED_PARAMETER} is no longer a search parameter: the place database is "
+                "the only search source. Choose a dataset instead - a population threshold "
+                "(dataset=5000), or leave it out to search every place - and see /v1/datasets."
+            ),
+        },
+        status_code=410,
+    )
 
 
 def error_response(error: BaseException) -> JSONResponse | None:
@@ -106,7 +148,8 @@ def refused_because_running(running: SearchRecord) -> JSONResponse:
             "error": SEARCH_ALREADY_RUNNING,
             "message": (
                 f"one search runs at a time on this server, and {running.search_id} "
-                f"({running.dataset} at n={running.request.get('n')}) {where}, "
+                f"({running.request.get('dataset_label')} at n={running.request.get('n')}) "
+                f"{where}, "
                 f"{running.seconds}s in. Close the connection that started it to stop it, or "
                 f"ask for /v1/searches/{running.search_id} to watch it."
             ),
@@ -117,25 +160,38 @@ def refused_because_running(running: SearchRecord) -> JSONResponse:
     )
 
 
-def cache_status(path: Path) -> dict[str, Any]:
-    """The local place cache: whether it is there, and how many places it holds.
+def read_only_connection(path: Path) -> sqlite3.Connection | None:
+    """A connection for listing, or None if there is nothing to list.
 
-    Read-only, and never created on the way past: listing what a server can search must not
-    leave an empty database behind.
+    Listing what a server can search must not leave an empty database behind, so this opens the
+    file read-only instead of going through `db.schema.connect`, which creates the schema.
     """
     if not path.is_file():
-        return {"path": str(path), "present": False, "places": 0}
+        return None
     try:
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
-    except sqlite3.Error as error:
-        return {"path": str(path), "present": True, "places": 0, "error": str(error)}
+    except sqlite3.Error:
+        return None
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def cache_status(path: Path) -> dict[str, Any]:
+    """The place database a search would read: where it is, and whether it has been imported.
+
+    `imported` is the answer a search depends on - a cache that is present but empty refuses
+    every request - so `/healthz` can say it before anybody tries.
+    """
+    connection = read_only_connection(path)
+    if connection is None:
+        return {"path": str(path), "present": path.is_file(), "places": 0, "imported": False}
     try:
         places = int(connection.execute("SELECT COUNT(*) FROM place").fetchone()[0])
     except sqlite3.Error:
         places = 0
     finally:
         connection.close()
-    return {"path": str(path), "present": True, "places": places}
+    return {"path": str(path), "present": True, "places": places, "imported": places > 0}
 
 
 def create_app(
@@ -176,21 +232,26 @@ def create_app(
     app.state.data_dir = None if data_dir is None else Path(data_dir)
     app.state.database = None if database is None else Path(database)
 
-    def datasets_dir() -> Path:
-        state: Path | None = app.state.data_dir
-        return default_data_dir() if state is None else state
-
     def cache_path() -> Path:
-        state: Path | None = app.state.database
-        return datasets_dir() / DEFAULT_DATABASE_NAME if state is None else state
+        """The database this server searches.
+
+        `--database` first, then `places.sqlite3` in the data directory it was given, then the
+        tool's own default - `DISTNSIMILARITY_DB`, or the cache beside the dumps. The same
+        answer the command line would come to, because a server and a terminal reading different
+        caches would report different distances for the same request.
+        """
+        database: Path | None = app.state.database
+        if database is not None:
+            return database
+        data_dir: Path | None = app.state.data_dir
+        return data_dir / DEFAULT_DATABASE_NAME if data_dir is not None else default_database_path()
 
     def build_request(
         *,
-        dataset: str,
+        dataset: str | None,
         n: int,
         min_population: int | None,
         full_comparison: bool,
-        source: str,
         top_k: int,
         direction: str,
     ) -> tuple[SearchRequest, dict[str, Any]]:
@@ -207,20 +268,24 @@ def create_app(
         except ValueError as error:
             raise InvalidSearchRequest(str(error)) from error
         search_request = SearchRequest(
-            dataset=dataset,
             n=n,
+            dataset=dataset,
             min_population=min_population,
             equal_length_prefilter=not full_comparison,
-            database=cache_path() if source == "database" else None,
+            database=cache_path(),
             top_k=top_k,
             direction=ranking,
         )
         echo = {
             "requested_dataset": dataset,
+            # The number a search filters on (null for the whole cache) and the words for it: a
+            # client filters on one and shows the other, and neither is a file name.
+            "dataset": search_request.dataset_threshold,
+            "dataset_label": search_request.dataset_name,
             "n": n,
             "min_population": min_population,
             "equal_length_prefilter": search_request.equal_length_prefilter,
-            "source": source,
+            "database": str(search_request.database_path),
             "top_k": search_request.top_k,
             "direction": search_request.direction.value,
         }
@@ -228,24 +293,35 @@ def create_app(
 
     @app.get("/healthz")
     async def health() -> dict[str, Any]:
-        """Alive, and how much searching it is doing right now."""
-        return {"status": "ok", "searches": {"live": searches.live_count}}
+        """Alive, how much searching it is doing right now, and what it has to search."""
+        return {
+            "status": "ok",
+            "searches": {"live": searches.live_count},
+            "database": cache_status(cache_path()),
+        }
 
     @app.get("/v1/datasets")
     async def datasets() -> dict[str, Any]:
-        """What can be searched: the dumps on disk, and the state of the place cache."""
-        directory = datasets_dir()
+        """The dataset choice: the thresholds this database can be searched at, in words.
+
+        Options come from the places actually in the table, each with the label to show, the
+        places it holds and the pairs a search there would compare, so a dropdown cannot offer
+        a dataset this server would search to nothing. The database itself is reported with
+        them, because an empty one offers nothing and says why.
+        """
+        path = cache_path()
+        connection = read_only_connection(path)
+        if connection is None:
+            return {"database": cache_status(path), "datasets": []}
+        try:
+            options = dataset_options(connection)
+        except sqlite3.Error:
+            return {"database": cache_status(path), "datasets": []}
+        finally:
+            connection.close()
         return {
-            "data_dir": str(directory),
-            "datasets": [
-                {
-                    "threshold": dataset.threshold,
-                    "name": dataset.path.name,
-                    "path": str(dataset.path),
-                }
-                for dataset in available_datasets(directory)
-            ],
-            "database": cache_status(cache_path()),
+            "database": cache_status(path),
+            "datasets": [option.as_dict() for option in options],
         }
 
     @app.get("/v1/searches")
@@ -267,25 +343,24 @@ def create_app(
         return JSONResponse(record.as_dict())
 
     async def open_on_worker(search_request: SearchRequest) -> SearchSession:
-        """Open a search off the event loop: reading a dump is the slow part of a refusal.
+        """Open a search off the event loop: counting a big candidate set is the slow part.
 
-        A cached `DatasetNotAvailableError` or empty cache is answered with a status code, so
-        this is where a bad parameter stops being a request and becomes an answer.
+        A dataset that names no threshold, and a database nobody has imported, are answered
+        with a status code, so this is where a bad parameter stops being a request and becomes
+        an answer - before a pair exists and before anything needs cancelling.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            pool.executor, partial(open_search, search_request, data_dir=datasets_dir())
-        )
+        return await loop.run_in_executor(pool.executor, partial(open_search, search_request))
 
     @app.get("/v1/estimate")
     async def estimate(
-        dataset: str = Query(..., description="population threshold, dump name or path"),
+        request: Request,
+        dataset: str | None = Query(
+            None, description="population threshold (5000) or dump name; omit for every place"
+        ),
         n: int = Query(..., description="exactly this many differing character positions"),
         min_population: int | None = Query(None, description="never compare places below this"),
         full_comparison: bool = Query(False, description="ignore the equal-length prefilter"),
-        source: Literal["dump", "database"] = Query(
-            "dump", description="read the dump file, or the imported place cache"
-        ),
         top_k: int = Query(DEFAULT_TOP_K, description="how many of the best finds to keep"),
         direction: str = Query("greatest", description="greatest or least distance first"),
     ) -> Response:
@@ -295,13 +370,15 @@ def create_app(
         only quoted once something has actually been measured on this machine, and says which
         of the two it is. This is the number a person decides with, so it is not a guess.
         """
+        refused = refusal_for_removed_parameter(request.query_params)
+        if refused is not None:
+            return refused
         try:
             search_request, echo = build_request(
                 dataset=dataset,
                 n=n,
                 min_population=min_population,
                 full_comparison=full_comparison,
-                source=source,
                 top_k=top_k,
                 direction=direction,
             )
@@ -316,8 +393,6 @@ def create_app(
             return JSONResponse(
                 {
                     **echo,
-                    "dataset": session.name,
-                    "source": session.source,
                     "places": session.stats.places,
                     "population_floor": session.stats.population_floor,
                     "candidate_pairs": session.stats.candidate_pairs,
@@ -330,13 +405,13 @@ def create_app(
 
     @app.get("/v1/search")
     async def stream_search(
-        dataset: str = Query(..., description="population threshold, dump name or path"),
+        request: Request,
+        dataset: str | None = Query(
+            None, description="population threshold (5000) or dump name; omit for every place"
+        ),
         n: int = Query(..., description="exactly this many differing character positions"),
         min_population: int | None = Query(None, description="never compare places below this"),
         full_comparison: bool = Query(False, description="ignore the equal-length prefilter"),
-        source: Literal["dump", "database"] = Query(
-            "dump", description="read the dump file, or the imported place cache"
-        ),
         top_k: int = Query(DEFAULT_TOP_K, description="how many of the best finds to keep"),
         direction: str = Query("greatest", description="greatest or least distance first"),
     ) -> Response:
@@ -347,17 +422,19 @@ def create_app(
         which of them are the best. Nothing is held back to be batched beyond the coalescing
         interval on each kind of event.
         """
+        refused = refusal_for_removed_parameter(request.query_params)
+        if refused is not None:
+            return refused
         try:
             # Both halves of the refusal are decided before a pair exists - building the
-            # request rejects a bad `n`, floor, list size or direction; resolving the dataset
-            # reads the file - so the answer is a status code, with no stream and nothing to
-            # cancel.
+            # request rejects a bad `n`, floor, dataset, list size or direction; opening the
+            # database reads nothing but counts - so the answer is a status code, with no
+            # stream and nothing to cancel.
             search_request, echo = build_request(
                 dataset=dataset,
                 n=n,
                 min_population=min_population,
                 full_comparison=full_comparison,
-                source=source,
                 top_k=top_k,
                 direction=direction,
             )
@@ -423,8 +500,6 @@ async def _search_events(
     try:
         yield started_line(
             search_id=search_id,
-            dataset=record.dataset,
-            source=record.source,
             request=echo,
             stats=record.stats.as_dict(),
             estimate=cost.as_dict(),

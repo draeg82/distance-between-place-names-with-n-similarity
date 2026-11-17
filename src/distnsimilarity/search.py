@@ -10,6 +10,10 @@ Cancellation is cooperative and shared. A search is handed a ``SearchControl``; 
 reads it on its own thread every `poll_every_comparisons` comparisons, and an adapter
 cancels it from wherever the client went away. Nothing is killed mid-comparison, and a
 cancelled search ends where the cancellation landed rather than part-way through a pair.
+
+There is one search source: the place database built by ``distnsimilarity-import``. A search
+that cannot read it says so rather than quietly reading something else, because a dump file and
+a database imported from a different dump give different answers to the same question.
 """
 
 from __future__ import annotations
@@ -21,17 +25,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
-from distnsimilarity.core.places import read_places
-from distnsimilarity.core.scan import (
-    POLL_EVERY_COMPARISONS,
-    MatchedPair,
-    candidate_scope,
-    scan,
-)
+from distnsimilarity.core.scan import POLL_EVERY_COMPARISONS, MatchedPair
 from distnsimilarity.core.topk import DEFAULT_TOP_K, RankedPair, Ranking, TopK, parse_direction
-from distnsimilarity.datasets import resolve_dataset
-from distnsimilarity.db.candidates import scan_database, scope_for
-from distnsimilarity.db.schema import connect, place_count
+from distnsimilarity.datasets import (
+    DatasetNotAvailableError,
+    WHOLE_DATABASE_LABEL,
+    dataset_label,
+    parse_dataset_threshold,
+)
+from distnsimilarity.db.candidates import (
+    dataset_options,
+    places_at_least,
+    scan_database,
+    scope_for,
+)
+from distnsimilarity.db.schema import connect, default_database_path, place_count
 
 #: Pairs pulled off a search per step when an adapter advances it in the background. A
 #: search only runs while somebody is reading it, which is what keeps a client that has
@@ -40,40 +48,55 @@ DEFAULT_BATCH_SIZE = 64
 
 
 class InvalidSearchRequest(ValueError):
-    """A request that cannot describe a search: no dataset, a negative `n`, a bad floor."""
+    """A request that cannot describe a search: a dataset naming no threshold, a negative `n`,
+    or a bad floor."""
 
 
 class CacheNotImportedError(RuntimeError):
-    """A search was asked for from the local place cache before it held any places."""
+    """A search was asked for before the place cache held any places.
+
+    This is the one thing that stops a server from searching at all, so it says what to run.
+    """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class SearchRequest:
-    """What to search: which dataset, which threshold, and which candidate rule.
+    """What to search: which dataset, which floor, and which candidate rule.
 
-    `dataset` is the same specifier the command line takes - a population threshold
-    (``"5000"``), a dump name (``"cities5000.txt"``) or a path. `database` names the local
-    place cache to search instead of reading the dump: the dataset is still required,
-    because it says what the search covers even when the places come out of the cache.
+    There is one source - the place cache built by ``distnsimilarity-import`` - so a request
+    names a *dataset* rather than a file: a population threshold (``"5000"``) or a dump name
+    (``"cities5000.txt"``), both meaning "cities of 5,000 or more people", or nothing at all to
+    mean every place in the cache. `min_population` stays a separate parameter that keeps its
+    own meaning: the caller's own number, applied before matching. Both are floors on the
+    population of a *candidate*, so giving both means the stricter of the two and neither
+    trims the results.
 
     `top_k` and `direction` say what "the best so far" means for this search. They belong to
     the request rather than to an adapter because the ranking is the core's: a browser, a
     command-line watcher and a CSV all rank a pair the same way or they disagree in public.
     """
 
-    dataset: str
     n: int
+    dataset: str | None = None
     min_population: int | None = None
     equal_length_prefilter: bool = True
     database: Path | None = None
     top_k: int = DEFAULT_TOP_K
     direction: Ranking = Ranking.GREATEST
+    #: The population threshold the dataset resolved to, or None for the whole cache. Filled in
+    #: by `__post_init__`, so a search reads a number instead of re-parsing a spelling.
+    dataset_threshold: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.dataset, str) or not self.dataset.strip():
-            raise InvalidSearchRequest(
-                f"a search has to name a dataset, got {self.dataset!r}"
+        # The dataset is resolved here, before any pair, so an adapter answers a dataset nobody
+        # would search with a refusal rather than a stream of nothing.
+        try:
+            threshold = (
+                None if self.dataset is None else parse_dataset_threshold(self.dataset)
             )
+        except DatasetNotAvailableError as error:
+            raise InvalidSearchRequest(str(error)) from error
+        object.__setattr__(self, "dataset_threshold", threshold)
         if isinstance(self.n, bool) or not isinstance(self.n, int):
             raise InvalidSearchRequest(
                 f"the character difference must be a whole number, got {self.n!r}"
@@ -103,6 +126,18 @@ class SearchRequest:
             raise InvalidSearchRequest(
                 f"a search has to keep at least one of its best pairs, got {self.top_k}"
             )
+
+    @property
+    def database_path(self) -> Path:
+        """The cache this search reads, defaulted the way every other entry point defaults it."""
+        return default_database_path() if self.database is None else Path(self.database)
+
+    @property
+    def dataset_name(self) -> str:
+        """What the dataset choice means, in the words the dropdown would have used."""
+        if self.dataset_threshold is None:
+            return WHOLE_DATABASE_LABEL
+        return dataset_label(int(self.dataset_threshold))
 
 
 class SearchControl:
@@ -246,6 +281,9 @@ class SearchStats:
 
     places: int = 0
     population_floor: int = 0
+    dataset_threshold: int | None = None
+    dataset_label: str = ""
+    database_path: str = ""
     candidate_pairs: int = 0
     pairs_compared: int = 0
     pairs_emitted: int = 0
@@ -294,6 +332,11 @@ class SearchStats:
         return {
             "places": self.places,
             "population_floor": self.population_floor,
+            # `dataset` is the number a request would have sent (or null for the whole cache) and
+            # `dataset_label` the words for it: one for a client to filter on, one for it to show.
+            "dataset": self.dataset_threshold,
+            "dataset_label": self.dataset_label,
+            "database": self.database_path,
             "candidate_pairs": self.candidate_pairs,
             "pairs_compared": self.pairs_compared,
             "pairs": self.pairs_emitted,
@@ -325,11 +368,9 @@ class SearchSession:
     """
 
     request: SearchRequest
-    dataset_path: Path | None
-    database_path: Path | None
+    database_path: Path
     control: SearchControl
     stats: SearchStats
-    source: str
     _pairs: Iterator[MatchedPair]
     _connection: sqlite3.Connection | None = field(default=None, repr=False)
     _iterator: Iterator[MatchedPair] | None = field(default=None, repr=False)
@@ -340,11 +381,12 @@ class SearchSession:
 
     @property
     def name(self) -> str:
-        """What to call what is being searched, in a message or a `started` event."""
-        if self.source == "database" and self.database_path is not None:
-            return self.database_path.name
-        assert self.dataset_path is not None
-        return self.dataset_path.name
+        """What to call what is being searched, in a message or a `started` event.
+
+        It is the dataset rule, not a file name: the cache holds places imported from any
+        number of dumps, so naming one of them would be a guess about what was searched.
+        """
+        return self.request.dataset_name
 
     @property
     def limit(self) -> int:
@@ -424,37 +466,64 @@ class SearchSession:
 def open_search(
     request: SearchRequest,
     *,
-    data_dir: Path | None = None,
     control: SearchControl | None = None,
 ) -> SearchSession:
     """Open the search a request describes, before any pair has been compared.
 
-    Reading the places is the slow part of a file-backed search and happens here, so an
-    adapter can report a bad dataset specifier as an error *before* it starts streaming
-    results. Two errors mean "cannot search this": ``DatasetNotAvailableError`` for a
-    dataset that is not there, and ``CacheNotImportedError`` for a local cache with no
-    places in it yet.
+    The place database is the only thing a search reads, and opening it is the only way a
+    search can fail before a pair exists: ``InvalidSearchRequest`` for a dataset that names no
+    threshold, ``DatasetNotAvailableError`` for one this database cannot honour, and
+    ``CacheNotImportedError`` for a database with no places in it. All three are answered before
+    the scan starts, which is what lets an adapter reply with a status code.
     """
     search_control = SearchControl() if control is None else control
-    if request.database is not None:
-        return _open_database_search(request, search_control)
-
-    path = resolve_dataset(request.dataset, data_dir)
-    places = read_places(path)
-    candidates, candidate_pairs = candidate_scope(
-        places,
+    database = request.database_path.expanduser()
+    # Read before `connect`, which creates the file: a search pointed at the wrong path should
+    # say "no database here", not leave an empty one behind to confuse the next caller.
+    present = database.is_file()
+    connection = connect(database)
+    if place_count(connection) == 0:
+        connection.close()
+        here = (
+            f"there is no place database at {database}"
+            if not present
+            else f"the place database at {database} has no places in it"
+        )
+        raise CacheNotImportedError(
+            f"{here}, and the place database is the only search source: run "
+            "distnsimilarity-import to fill it from a GeoNames dump"
+        )
+    if request.dataset_threshold is not None:
+        # A dataset is a rule about the places that exist, so a rule this cache cannot honour is
+        # refused with the rules it can - the same list the dropdown is built from, so the answer
+        # and the choice a person was looking at cannot disagree.
+        if places_at_least(connection, int(request.dataset_threshold)) == 0:
+            choices = ", ".join(option.label for option in dataset_options(connection))
+            connection.close()
+            raise DatasetNotAvailableError(
+                f"no place in {database} has {int(request.dataset_threshold):,} or more people; "
+                f"this database can be searched as: {choices}"
+            )
+    scope = scope_for(
+        connection,
         request.min_population,
-        equal_length_prefilter=request.equal_length_prefilter,
+        dataset_threshold=request.dataset_threshold,
     )
     stats = SearchStats(
-        places=candidates,
-        population_floor=request.min_population or 0,
-        candidate_pairs=candidate_pairs,
+        places=scope.places,
+        population_floor=scope.population_floor,
+        dataset_threshold=request.dataset_threshold,
+        dataset_label=request.dataset_name,
+        database_path=str(database.resolve()),
+        candidate_pairs=(
+            scope.pair_count if request.equal_length_prefilter else scope.full_pair_count
+        ),
     )
-    pairs = scan(
-        places,
+    pairs = scan_database(
+        connection,
         request.n,
         request.min_population,
+        dataset_threshold=request.dataset_threshold,
         equal_length_prefilter=request.equal_length_prefilter,
         cancel=search_control.stopped,
         progress=_count_comparisons(stats, search_control),
@@ -462,12 +531,11 @@ def open_search(
     )
     return SearchSession(
         request=request,
-        dataset_path=path,
-        database_path=None,
+        database_path=database.resolve(),
         control=search_control,
         stats=stats,
-        source="dump",
         _pairs=pairs,
+        _connection=connection,
     )
 
 
@@ -488,43 +556,3 @@ def _count_comparisons(
 
     return report
 
-
-def _open_database_search(request: SearchRequest, control: SearchControl) -> SearchSession:
-    assert request.database is not None
-    database = Path(request.database).expanduser()
-    connection = connect(database)
-    if place_count(connection) == 0:
-        connection.close()
-        raise CacheNotImportedError(
-            f"the place cache at {database} has no places in it yet: run "
-            "distnsimilarity-import first, or search the dump file instead"
-        )
-    scope = scope_for(connection, request.min_population)
-    stats = SearchStats(
-        places=scope.places,
-        population_floor=scope.population_floor,
-        candidate_pairs=(
-            scope.pair_count
-            if request.equal_length_prefilter
-            else scope.full_pair_count
-        ),
-    )
-    pairs = scan_database(
-        connection,
-        request.n,
-        request.min_population,
-        equal_length_prefilter=request.equal_length_prefilter,
-        cancel=control.stopped,
-        progress=_count_comparisons(stats, control),
-        poll_every_comparisons=control.poll_every_comparisons,
-    )
-    return SearchSession(
-        request=request,
-        dataset_path=None,
-        database_path=database.resolve(),
-        control=control,
-        stats=stats,
-        source="database",
-        _pairs=pairs,
-        _connection=connection,
-    )

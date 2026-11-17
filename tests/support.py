@@ -120,26 +120,64 @@ def write_dump_lines(path: Path, lines: list[list[str]]) -> Path:
     return path
 
 
-def noisy_dump(
-    path: Path, *, places: int = 1_500, name_length: int = 7, seed: int = 20261116
+def place_database(
+    path: Path, rows: list[dict[str, Any]], *, source_threshold: int = 1_000
 ) -> Path:
-    """A dump that starts with one pair and then searches for a while without finding one.
+    """A place database holding exactly these places, imported from a throwaway dump.
 
-    Cancellation and streaming need a scan that takes noticeable time without being a real
-    dataset. Every name here is the same length, so the equal-length prefilter cannot skip
-    the noise and the scan has to walk it; the first two rows are a planted pair at `n=1`.
-    The names come from a seeded generator, so the file is the same every time and a test can
-    compare a stopped search against a full one.
+    The database is the only search source, so every test that searches needs one, and it goes
+    through the production import rather than a second way of filling a table the tool would
+    never build. `source_threshold` says which dump that was: provenance, and what a test about
+    the datasets a cache offers has to set.
+    """
+    dump = write_dump(path.parent / f"cities{source_threshold}.txt", rows)
+    connection = import_dump(path, dump, source_threshold=source_threshold)
+    connection.close()
+    return path
+
+
+def noisy_rows(
+    *, places: int = 1_500, name_length: int = 7, seed: int = 20261116
+) -> list[dict[str, Any]]:
+    """The places `noisy_dump` writes, so a dump and a database can hold the same noise.
+
+    Every name is the same length, so the equal-length prefilter cannot skip the noise and the
+    scan has to walk it; the first two rows are a planted pair at `n=1`. The names come from a
+    seeded generator, so the set is the same every time and a test can compare a stopped search
+    against a full one.
+
+    The planted pair sits at the lowest populations in the set on purpose: a dump is read in
+    file order and a database in ascending population, and that is the only ordering both can
+    agree on - so "the pair is at the head" is true of either, and `NOISY_DUMP_PAIR` names the
+    places in the order a search reports them.
     """
     generator = random.Random(seed)
     rows = [
-        dump_row(1, "abelard", 44.0, -93.0, population=50_000),
-        dump_row(2, "abelurd", 39.0, -89.0, population=40_000),
+        dump_row(1, "abelard", 44.0, -93.0, population=1),
+        dump_row(2, "abelurd", 39.0, -89.0, population=2),
     ]
     for index in range(3, places + 1):
         name = "".join(generator.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(name_length))
         rows.append(dump_row(index, name, index / 100.0, index / 50.0, population=1_000))
-    return write_dump(path, rows)
+    return rows
+
+
+def noisy_dump(
+    path: Path, *, places: int = 1_500, name_length: int = 7, seed: int = 20261116
+) -> Path:
+    """A dump that starts with one pair and then searches for a while without finding one."""
+    return write_dump(path, noisy_rows(places=places, name_length=name_length, seed=seed))
+
+
+def noisy_database(
+    path: Path, *, places: int = 1_500, name_length: int = 7, seed: int = 20261116
+) -> Path:
+    """`noisy_dump` imported: the same planted pair and the same noise, in a place database.
+
+    Cancellation and streaming tests need a scan that takes noticeable time without being a real
+    dataset, and the database is where a scan now happens.
+    """
+    return place_database(path, noisy_rows(places=places, name_length=name_length, seed=seed))
 
 
 #: The pair `noisy_dump` plants, in the order a scan reports it (file order).
