@@ -19,11 +19,13 @@ in the page is a second answer to the same question.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -35,6 +37,7 @@ from browser_support import (
     MAP_JS,
     MEASURED_ASSETS,
     RESULTS_JS,
+    drive_page,
     in_presentation,
     in_the_adapter,
     page_assets,
@@ -255,6 +258,702 @@ class TestTheControls:
         )
 
 
+#: One `/v1/estimate` answer, in the shape the endpoint answers with. The parameters that come back
+#: are the ones that went up - the harness substitutes them from the request, as the real endpoint
+#: echoes them - so a test cannot pass by reading a stale fixture after changing a parameter. The
+#: numbers are one small dataset's: `cities of 5,000 or more people`, 120 places, 7,140 pairs.
+COSTED_SEARCH: dict[str, object] = {
+    "requested_dataset": "@query",
+    "dataset": 5000,
+    "dataset_label": "cities of 5,000 or more people",
+    "n": "@query",
+    "min_population": "@query",
+    "equal_length_prefilter": True,
+    "database": "/tmp/places.sqlite3",
+    "top_k": "@query",
+    "direction": "@query",
+    "places": 120,
+    "population_floor": 5000,
+    "candidate_pairs": 7140,
+    "estimate": {
+        "seconds": 0.4,
+        "basis": "measured on this machine",
+        "comparisons_per_second": 18_000_000,
+    },
+}
+
+
+def query_pairs(queries: list[str]) -> list[dict[str, str]]:
+    """`["n=3&dataset=5000", ...]` as mappings, so a test says which parameter changed."""
+    return [dict(one.split("=", 1) for one in query.split("&") if one) for query in queries]
+
+
+def parameters_of(script: str) -> str:
+    """The body of `parametersToSend`, which is where the page decides what a search is asked for."""
+    body = script[script.index("function parametersToSend(") :]
+    return body[: body.index("\n}")]
+
+
+#: The controls that say what state a search is in. Read the same way mid-search and after one, so
+#: the two states can be compared: one search runs at a time, so a page mid-search offers Start and
+#: takes away Stop, and the fields stay editable either way because setting up the next search while
+#: watching this one is not a second search.
+CONTROLS = ("searching", "startDisabled", "stopHidden", "indicatorHidden", "fieldsDisabled")
+
+
+def control_state(controls: dict[str, object]) -> dict[str, object]:
+    """The parts of the page's controls that carry the search state, ignoring its words."""
+    return {name: controls[name] for name in CONTROLS}
+
+
+#: Four events, quoted from a real `n=2 dataset=1000` scan against the 146,782-place cache (its
+#: newline-delimited JSON, with the rows cut to the pair this file draws). They are literals rather
+#: than something built here because the point of the control tests is what the page does while a
+#: search is mid-flight - and a page fed the events a real server really sent is being asked about
+#: the search it would really be watching. `results` carries no `candidate_pairs`: only a tick knows
+#: the denominator, which is a fact the wording has to respect.
+STARTED: dict[str, object] = {
+    "type": "started",
+    "search_id": "4a4c2bc8bf96",
+    "requested_dataset": "1000",
+    "dataset": 1000,
+    "dataset_label": "cities of 1,000 or more people",
+    "n": 2,
+    "min_population": None,
+    "equal_length_prefilter": True,
+    "database": "/tmp/distn-smoke/places.sqlite3",
+    "top_k": 10,
+    "direction": "greatest",
+    "places": 124272,
+    "population_floor": 1000,
+    "candidate_pairs": 666215784,
+    "improvements": 0,
+    "pairs": 0,
+    "elapsed_seconds": 0.0,
+    "estimate": {
+        "candidate_pairs": 666215784,
+        "comparisons_per_second": None,
+        "seconds": None,
+        "basis": "not measured on this machine yet",
+    },
+}
+
+TICK: dict[str, object] = {
+    "type": "progress",
+    "search_id": "4a4c2bc8bf96",
+    "places": 124272,
+    "pairs_compared": 41_000_000,
+    "candidate_pairs": 666215784,
+    "share_compared": 0.0615,
+    "pairs": 10,
+    "improvements": 3,
+    "elapsed_seconds": 20.4,
+    "estimated_seconds_remaining": 312.0,
+}
+
+#: The leading find of that scan: two Spanish-named places on the far side of each other, whose arc
+#: crosses the antimeridian.
+ARANGA_AND_ARANUI: dict[str, object] = {
+    "first": {
+        "geonameid": 2520736,
+        "asciiname": "Aranga",
+        "display_name": "Aranga",
+        "latitude": 43.23469,
+        "longitude": -8.01705,
+        "population": 970,
+        "country_code": "ES",
+    },
+    "second": {
+        "geonameid": 2194088,
+        "asciiname": "Aranui",
+        "display_name": "Aranui",
+        "latitude": -43.50833,
+        "longitude": 172.70013,
+        "population": 940,
+        "country_code": "NZ",
+    },
+    "distance_km": 19949.645,
+    "character_difference": 2,
+    "differing_positions": [0, 3],
+}
+
+
+def a_list(rows: list[dict[str, object]], *, improvements: int = 1, seen_pairs: int = 1) -> dict[str, object]:
+    """A `results` event carrying the whole best-so-far list, as the API sends it."""
+    return {
+        "type": "results",
+        "search_id": STARTED["search_id"],
+        "direction": "greatest",
+        "top_k": 10,
+        "results": rows,
+        "improvements": improvements,
+        "seen_pairs": seen_pairs,
+        "pairs_compared": TICK["pairs_compared"],
+        "elapsed_seconds": TICK["elapsed_seconds"],
+    }
+
+
+FINISHED: dict[str, object] = {
+    "type": "done",
+    "search_id": STARTED["search_id"],
+    "places": 124272,
+    "population_floor": 1000,
+    "dataset": 1000,
+    "dataset_label": "cities of 1,000 or more people",
+    "database": "/tmp/distn-smoke/places.sqlite3",
+    "candidate_pairs": 666215784,
+    "pairs_compared": 41_000_000,
+    "pairs": 10,
+    "improvements": 3,
+    "comparison_polls": 61_000,
+    "elapsed_seconds": 20.4,
+    "comparisons_per_second": 2_009_803.9,
+    "share_compared": 0.0615,
+    "completed": True,
+    "cancelled": False,
+    "cancel_reason": None,
+    "retryable": False,
+    "error": None,
+}
+
+#: One search, streamed: the price, `started`, one tick, one list, then a stream that stays open
+#: until the test hangs up on it or releases it.
+ONE_SEARCH_OPEN = [
+    [[STARTED], [TICK], [a_list([ARANGA_AND_ARANUI], improvements=3, seen_pairs=10)], "hold"]
+]
+
+
+def one_search(**echoed: object) -> list[list[object]]:
+    """One whole search, streamed to its end, with the `started` echoing these parameters.
+
+    The echo is the only part that varies: the point of passing `n=4` is that the answer comes back
+    saying `n=4`, so a test about searching again cannot pass by drawing one search's echo twice.
+    """
+    return [
+        [{**STARTED, **echoed}],
+        [TICK],
+        [a_list([ARANGA_AND_ARANUI], improvements=3, seen_pairs=10)],
+        [FINISHED],
+    ]
+
+
+#: A stream with a `done` still to come: a search stopped while the server had more to say, which
+#: is the only shape that can catch a page painting a finished search it had already given up on.
+OPEN_THEN_FINISHED = [ONE_SEARCH_OPEN[0] + [[FINISHED]]]
+
+
+class TestDecidingWhatASearchWillCost:
+    """The price is what a person decides with, so it has to be on screen before the decision."""
+
+    def test_the_price_of_the_parameters_on_screen_is_shown_before_anything_is_searched(self) -> None:
+        seen = drive_page(
+            """
+            await page.settle();
+            return {
+              line: page.lines().estimate,
+              costed: page.askedFor("/v1/estimate"),
+              searched: page.askedFor("/v1/search"),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            parameters={"n": 3, "dataset": "5000", "direction": "greatest", "top_k": 50},
+        )
+
+        assert seen["searched"] == [], "a price is not a reason to start a search"
+        assert seen["costed"] != [], "the page should ask what the parameters on screen would cost"
+        line = seen["line"]
+        assert "3 differing characters" in line, (
+            f"the number of differing characters is one of the things being decided, so it belongs "
+            f"in the sentence about what it costs: {line}"
+        )
+        assert "population floor of 5,000" in line, (
+            f"the floor in effect is the other half of the decision, and it is the server's resolved "
+            f"floor rather than whatever box was left blank: {line}"
+        )
+        assert "7,140" in line
+
+    def test_changing_a_parameter_asks_the_server_what_that_one_costs(self) -> None:
+        seen = drive_page(
+            """
+            await page.settle();
+            const before = page.lines().estimate;
+            page.parameters({ n: 1 });
+            await page.settle();
+            return {
+              before,
+              after: page.lines().estimate,
+              costed: page.askedFor("/v1/estimate"),
+              searched: page.askedFor("/v1/search"),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            parameters={"n": 3, "dataset": "5000", "direction": "greatest", "top_k": 50},
+        )
+
+        assert "3 differing characters" in seen["before"]
+        assert "1 differing character" in seen["after"], (
+            f"the price on screen must be the price of the search about to run, not of the one "
+            f"before it: {seen['after']}"
+        )
+        assert [sent.get("n") for sent in query_pairs(seen["costed"])] == ["3", "1"], (
+            f"one price per distinct set of parameters, the second one for the change: {seen['costed']}"
+        )
+        assert seen["searched"] == []
+
+
+class TestOneSearchAtATimeOnThePage:
+    """One search per machine, which is what a page must remember for itself.
+
+    The server refuses a second search (`tests/test_http_search.py` holds that), but a page that
+    hung up on its own search in order to start another was never refused anything: it simply
+    threw away a search the reader was watching. The ticket asks for a refusal instead, in words,
+    with the way out in the same sentence - and the way out is Stop, which is already on screen.
+    """
+
+    def test_pressing_search_while_one_runs_is_refused_in_words_that_say_what_to_do(self) -> None:
+        seen = drive_page(
+            """
+            await page.settle();
+            page.start();
+            await page.settle();
+            await page.start();
+            await page.settle();
+            return {
+              lines: page.lines(),
+              controls: page.controls(),
+              searches: page.askedFor("/v1/search"),
+              costed: page.askedFor("/v1/estimate").length,
+              rows: page.rows().length,
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=ONE_SEARCH_OPEN,
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert seen["searches"] != [], "the first press has to have started a search"
+        assert len(seen["searches"]) == 1, (
+            f"a second press must not ask for a second search: {seen['searches']}"
+        )
+        message = seen["lines"]["message"]
+        assert "already running" in message, message
+        assert str(STARTED["search_id"]) in message, (
+            f"the refusal has to name the search in the way, as the server's does: {message}"
+        )
+        assert "cities of 1,000 or more people" in message, message
+        assert "2 differing characters" in message, message
+        assert "stop" in message.lower(), (
+            f"a refusal that does not say what to do about it is a dead end: {message}"
+        )
+        assert seen["rows"] == 1, "refusing the second search must leave the first one's list alone"
+        assert seen["controls"]["startDisabled"] is True, (
+            "the control that was refused says so on its own, rather than looking pressable"
+        )
+        assert seen["controls"]["stopHidden"] is False
+        assert "Searching" in seen["lines"]["status"], (
+            f"the running search keeps its own status line: {seen['lines']['status']}"
+        )
+
+
+class TestReadingTheStreamInPieces:
+    """The bytes of a search do not arrive as records, and the page may not pretend they do.
+
+    `parseStream` takes the unfinished tail of one read and hands it to the next. This is the shape
+    the bug that #10 was handed over with lived in: a page that throws away a read whose last record
+    is incomplete draws nothing at all, and a page fed one whole record per chunk never asks the
+    question. So the records here are cut in half, at a different place in each, and what is asked is
+    what ended up on screen.
+    """
+
+    def test_a_record_cut_across_two_reads_is_drawn_once_and_not_reported_as_a_failure(self) -> None:
+        started = json.dumps(STARTED)
+        listing = json.dumps(a_list([ARANGA_AND_ARANUI], improvements=3, seen_pairs=10))
+        # Cut in two different places, so neither half is accidentally a whole record: the first read
+        # ends inside the `started`, the second inside the list.
+        halves = [started[: len(started) // 2], started[len(started) // 2 :] + "\n"]
+        halves += [listing[:40], listing[40:] + "\n"]
+        seen = drive_page(
+            """
+            page.start();
+            await page.settle();
+            return {
+              status: page.lines().status,
+              rows: page.rows(),
+              message: page.lines().message,
+              statuses: page.wrote("status-text"),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[[*halves, "hold"]],
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert seen["status"].startswith("Searching"), (
+            f"the half a reader got first is still the start of a search: {seen['status']}"
+        )
+        assert len(seen["rows"]) == 1, (
+            f"a record that arrived in two pieces is one row, not none and not two: {seen['rows']}"
+        )
+        assert "Aranga" in seen["rows"][0] and "19,949.645" in seen["rows"][0], seen["rows"][0]
+        assert len(seen["statuses"]) == 2 and len(set(seen["statuses"])) == 2, (
+            "each record is drawn once when its last byte arrives - once per record, not once per "
+            f"read and not twice for the piece that was finished: {seen['statuses']}"
+        )
+        assert seen["statuses"][0].startswith("Searching cities of 1,000"), seen["statuses"]
+        assert seen["status"] == seen["statuses"][-1], seen["status"]
+        assert seen["message"] == "", (
+            f"a search whose bytes are merely slow is not a search that failed: {seen['message']}"
+        )
+
+
+class TestStoppingARunningSearch:
+    """A search is under the reader's control while it runs, which is what Stop is for.
+
+    Hanging up the connection is the only way this API is told to stop, so these are assertions
+    about the connection the page let go of, not about a spinner disappearing: a stream still being
+    read is a scan still running on the server.
+    """
+
+    def test_pressing_stop_hangs_up_on_the_stream_and_gives_the_controls_back(self) -> None:
+        seen = drive_page(
+            """
+            page.start();
+            await page.settle();
+            page.stop();
+            await page.settle();
+            return {
+              searches: page.searches(),
+              controls: page.controls(),
+              lines: page.lines(),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=ONE_SEARCH_OPEN,
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert len(seen["searches"]) == 1, seen["searches"]
+        assert seen["searches"][0]["aborted"] is True, (
+            "stopping is closing the connection: that is how this server learns nobody is watching, "
+            f"and a scan left reading is a scan still costing the machine: {seen['searches']}"
+        )
+        controls = seen["controls"]
+        assert control_state(controls) == {
+            "searching": False,
+            "startDisabled": False,
+            "stopHidden": True,
+            "indicatorHidden": True,
+            "fieldsDisabled": False,
+        }, f"a stopped search leaves a usable page, not a page stuck mid-search: {controls}"
+        assert seen["lines"]["status"] == "Stopped", seen["lines"]
+        assert str(STARTED["search_id"]) in seen["lines"]["message"], (
+            f"the sentence says which search ended, so a reader can tie it to the scan they watched: "
+            f"{seen['lines']['message']}"
+        )
+
+    def test_a_stopped_search_keeps_the_list_it_had_found_and_says_so(self) -> None:
+        seen = drive_page(
+            """
+            page.start();
+            await page.settle();
+            page.stop();
+            await page.settle();
+            return {
+              rows: page.rows(),
+              tableHidden: page.tableHidden(),
+              message: page.lines().message,
+              caption: page.lines().caption,
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=ONE_SEARCH_OPEN,
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert len(seen["rows"]) == 1, (
+            f"stopping early is how a person reads a scan that is already good enough, so the "
+            f"finding has to survive it: {seen['rows']}"
+        )
+        row = seen["rows"][0]
+        assert "Aranga" in row and "Aranui" in row and "19,949.645" in row, (
+            f"and it has to still be readable, not a row of empty cells: {row}"
+        )
+        assert seen["tableHidden"] is False
+        message = seen["message"]
+        assert "list on screen is what it had found" in message, message
+        assert "nothing more is coming" in message, (
+            f"a list that has stopped moving has to be said to have stopped: {message}"
+        )
+        assert "Aranga" in seen["caption"], (
+            f"the map keeps the pair the search had found too: {seen['caption']}"
+        )
+
+    def test_a_stopped_search_never_reports_itself_as_finished(self) -> None:
+        """AC: a stopped search does not emit a terminal success state as though it had finished.
+
+        The server may still be writing when the page hangs up, and a page that read a `done` after
+        a Stop would be claiming a scan had walked all its candidates when it had been cancelled
+        part way. So this stops mid-stream, then lets the rest of the stream arrive, and asks the
+        whole history of the two status lines rather than whatever is on screen at the end.
+        """
+        seen = drive_page(
+            """
+            page.start();
+            await page.settle();
+            page.stop();
+            await page.settle();
+            page.release();
+            await page.settle();
+            return {
+              status: page.wrote("status-text"),
+              message: page.wrote("message-line"),
+              searches: page.searches(),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=OPEN_THEN_FINISHED,
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert seen["searches"][0]["aborted"] is True
+        finished = [line for line in seen["status"] + seen["message"] if "finish" in line.lower()]
+        assert finished == [], (
+            f"a search this page stopped must never be described as finished: {seen}"
+        )
+        assert seen["status"][-1] == "Stopped", seen["status"]
+        assert [line for line in seen["message"] if "Stopped" in line] != [], seen["message"]
+
+    def test_pressing_the_pages_own_stop_button_hangs_up_on_the_stream(self) -> None:
+        """The control a reader presses, not the function the module exports.
+
+        `wireUpPage` is what makes Stop mean Stop, and it is the one part of the page a driven test
+        can otherwise break without anything failing: a listener that is not attached, or attached to
+        the wrong control, is a Stop button that does nothing while the scan carries on costing.
+        """
+        seen = drive_page(
+            """
+            page.press("start-button");
+            await page.settle();
+            page.press("stop-button");
+            await page.settle();
+            return {
+              searches: page.searches(),
+              status: page.lines().status,
+              controls: page.controls(),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=ONE_SEARCH_OPEN,
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert len(seen["searches"]) == 1, seen["searches"]
+        assert seen["searches"][0]["aborted"] is True, (
+            f"the button on the page is what ends the scan, so it is the button that has to abort: "
+            f"{seen['searches']}"
+        )
+        assert seen["status"] == "Stopped", seen["status"]
+        assert seen["controls"]["stopHidden"] is True and seen["controls"]["startDisabled"] is False
+
+    def test_pressing_stop_with_nothing_running_says_so_without_undressing_the_last_search(self) -> None:
+        """Stop is on screen only while a search runs, but Enter in a field still reaches it.
+
+        A stop that stops nothing must still leave the page honest: the status line belongs to the
+        search that finished, and replacing it with a word about idleness would throw away the answer
+        that is already there.
+        """
+        seen = drive_page(
+            """
+            await page.start();
+            const finished = page.lines().status;
+            page.stop();
+            await page.settle();
+            return {
+              finished,
+              status: page.lines().status,
+              message: page.lines().message,
+              searches: page.searches(),
+              controls: page.controls(),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[one_search()],
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert len(seen["searches"]) == 1, (
+            f"pressing Stop is not a way to start a search, or to start a second one: {seen['searches']}"
+        )
+        assert "no search running" in seen["message"].lower(), seen["message"]
+        assert "finished" in seen["finished"].lower(), (
+            f"the search before this press did finish, which is what the status is for: {seen['finished']}"
+        )
+        assert seen["status"] == seen["finished"], (
+            f"a stop that stopped nothing has not changed what the last search said: {seen['status']}"
+        )
+        assert seen["controls"]["startDisabled"] is False
+
+
+class TestSearchingAgainWithoutReloading:
+    """AC: changing the parameters and restarting needs no page reload.
+
+    A reload would throw away the list, the map and the price with it, and would leave the previous
+    stream to be noticed by the server rather than hung up on. Everything here happens to one page.
+    """
+
+    def test_stopping_then_pressing_search_again_runs_a_second_search_on_the_same_page(self) -> None:
+        seen = drive_page(
+            """
+            page.start();
+            await page.settle();
+            page.stop();
+            await page.settle();
+            const left = page.rows().length;
+            page.parameters({ n: 4 });
+            await page.settle();
+            await page.start();
+            await page.settle();
+            return {
+              left,
+              searches: page.searches(),
+              urls: page.urls(),
+              status: page.wrote("status-text"),
+              rows: page.rows(),
+              controls: page.controls(),
+              reloaded: page.reloaded(),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[ONE_SEARCH_OPEN[0], one_search(n=4)],
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert seen["left"] == 1, "the stopped search left its list on the page"
+        assert len(seen["searches"]) == 2, (
+            f"a stopped search must not leave the page unable to search again: {seen['searches']}"
+        )
+        first, second = query_pairs([one["query"] for one in seen["searches"]])
+        assert first["n"] == "2" and second["n"] == "4", (
+            f"the second search carries the parameters that are on the page now: {seen['searches']}"
+        )
+        assert seen["reloaded"] is False, "the page never reloaded: this is the same page"
+        assert seen["status"][-1] == "Search finished", seen["status"]
+        assert len(seen["rows"]) == 1
+        assert seen["controls"]["startDisabled"] is False
+
+    def test_the_price_of_the_second_search_is_asked_for_before_its_stream_opens(self) -> None:
+        seen = drive_page(
+            """
+            page.parameters({ n: 4 });
+            await page.settle();
+            await page.start();
+            await page.settle();
+            return {
+              urls: page.urls(),
+              costed: page.askedFor("/v1/estimate"),
+              searches: page.searches(),
+              estimate: page.lines().estimate,
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[one_search(n=4)],
+            parameters={"n": 2, "dataset": "5000", "direction": "greatest", "top_k": 50},
+        )
+
+        costed = seen["urls"].index("/v1/estimate?n=4&dataset=5000&direction=greatest&top_k=50")
+        searched = seen["urls"].index("/v1/search?n=4&dataset=5000&direction=greatest&top_k=50")
+        assert costed < searched, (
+            f"the price of the search has to be on screen before its stream opens: {seen['urls']}"
+        )
+        assert len(set(seen["costed"])) == len(seen["costed"]), (
+            f"counting the same candidate pairs twice for one decision is the expensive part of "
+            f"the page doing that: {seen['costed']}"
+        )
+        assert "4 differing characters" in seen["estimate"], seen["estimate"]
+
+
+class TestRapidClicking:
+    """AC: repeated rapid start and stop clicks cannot leave an orphaned scan running.
+
+    The page can only speak for the page: every stream it opened has to be one it either watched to
+    the end or hung up on. `tests/test_http_search.py` holds the other half - that a hung-up stream
+    really does stop the scan behind it - and the two together are what 'no orphans' means.
+    """
+
+    def test_alternating_start_and_stop_leaves_every_stream_the_page_opened_hung_up_on(self) -> None:
+        seen = drive_page(
+            """
+            for (let press = 0; press < 5; press += 1) {
+              page.start();
+              await page.settle(2);
+              page.stop();
+              await page.settle(2);
+            }
+            await page.settle();
+            return { searches: page.searches(), controls: page.controls(), lines: page.lines() };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[ONE_SEARCH_OPEN[0]] * 5,
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert len(seen["searches"]) == 5, seen["searches"]
+        still_reading = [one for one in seen["searches"] if not one["aborted"]]
+        assert still_reading == [], (
+            f"a stream this page stopped reading but did not hang up on is an orphaned scan: "
+            f"{still_reading}"
+        )
+        assert seen["controls"]["searching"] is False
+        assert seen["controls"]["startDisabled"] is False
+        assert seen["lines"]["status"] == "Stopped", seen["lines"]
+
+    def test_pressing_search_repeatedly_while_a_search_runs_starts_one_search_only(self) -> None:
+        seen = drive_page(
+            """
+            page.start();
+            await page.settle();
+            for (let press = 0; press < 4; press += 1) {
+              await page.start();
+            }
+            await page.settle();
+            return {
+              searches: page.searches(),
+              rows: page.rows().length,
+              status: page.wrote("status-text"),
+              controls: page.controls(),
+              refused: page.wrote("message-line").filter((line) => line !== ""),
+            };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[ONE_SEARCH_OPEN[0]],
+            parameters={"n": 2, "dataset": "1000", "direction": "greatest", "top_k": 10},
+        )
+
+        assert len(seen["searches"]) == 1, seen["searches"]
+        assert seen["rows"] == 1, "and the running search keeps drawing while the presses are refused"
+        assert seen["status"] != [] and all(
+            line.startswith("Searching") for line in seen["status"]
+        ), f"refusing a search must not disturb the status of the one running: {seen['status']}"
+        assert len(set(seen["refused"])) == 1 and len(seen["refused"]) == 4, seen["refused"]
+        assert control_state(seen["controls"]) == {
+            "searching": True,
+            "startDisabled": True,
+            "stopHidden": False,
+            "indicatorHidden": False,
+            "fieldsDisabled": False,
+        }, (
+            "mid-search the page says what it is doing: Stop is offered, Start is refused twice over "
+            f"- by the control and by the sentence - and the fields stay open to set up the next one: "
+            f"{seen['controls']}"
+        )
+        assert "already running" in seen["refused"][0], (
+            f"the refusal has to say what is in the way and what to do about it: {seen['refused'][0]}"
+        )
+        assert "Stop" in seen["refused"][0] and "4a4c2bc8bf96" in seen["refused"][0], (
+            f"and name the way out and the search it is refusing to interrupt: {seen['refused'][0]}"
+        )
+
+
 class TestTheWireThePageReads:
     def test_every_field_the_page_reads_is_on_the_wire(self, tmp_path: Path) -> None:
         available = every_field_on_the_wire(tmp_path)
@@ -294,7 +993,11 @@ class TestTheWireThePageReads:
             f"these names go out as query parameters: {sent}"
         )
         script = page_assets()["app.js"]
-        assert "new FormData(form)" in script, "the form is forwarded as it stands"
+        sent = parameters_of(script)
+        assert "new FormData(form)" in sent, (
+            "the form is forwarded as it stands: every named field on it and nothing invented, "
+            f"so a field added to the page is a parameter on the wire without a new line of script: {sent}"
+        )
         assert "${ESTIMATE_ENDPOINT}?" in script and "${SEARCH_ENDPOINT}?" in script, (
             "one set of parameters pays for the estimate and runs the search, so the price cannot "
             "be quoted for a different search from the one that starts"
@@ -305,13 +1008,46 @@ class TestTheWireThePageReads:
             )
 
     def test_a_control_left_empty_sends_nothing_rather_than_a_blank_value(self) -> None:
-        """A population floor nobody typed is the absence of a rule, not a rule about nothing."""
-        script = page_assets()["app.js"]
-        sent = script[script.index("function parametersToSend(") :]
-        assert 'if (text !== "")' in sent[: sent.index("\n}")], (
-            "sending an empty floor as a blank value is a refusal about a field nobody filled in"
+        """A population floor nobody typed is the absence of a rule, not a rule about nothing.
+
+        `min_population=` is not "no floor", it is a request the endpoint refuses over a field no
+        ever filled in, so the parameter has to be absent from the query the server is handed.
+        """
+        seen = drive_page(
+            """
+            page.parameters({ min_population: "" });
+            await page.settle();
+            await page.start();
+            await page.settle();
+            return { search: page.searches()[0].query, costed: page.askedFor("/v1/estimate").at(-1) };
+            """,
+            json_bodies={"/v1/estimate": COSTED_SEARCH},
+            streams=[one_search()],
+            parameters={
+                "n": 2,
+                "dataset": "1000",
+                "direction": "greatest",
+                "top_k": 10,
+                "min_population": "1000",
+            },
         )
-        assert "new URLSearchParams()" in sent[: sent.index("\n}")], (
+
+        sent = parse_qs(seen["search"])
+        assert "min_population" not in sent, (
+            f"the empty control arrived as a parameter the endpoint would refuse: {sent}"
+        )
+        assert sent["n"] == ["2"] and sent["dataset"] == ["1000"], (
+            f"and leaving one field out must not take the others with it: {sent}"
+        )
+        assert "min_population" not in seen["costed"], (
+            f"the price has to be for the search that runs, empty control and all: {seen['costed']}"
+        )
+        script = page_assets()["app.js"]
+        sent = parameters_of(script)
+        assert 'text !== ""' in sent, (
+            "the filter that does this is one line, shared by every control on the form"
+        )
+        assert "new URLSearchParams()" in sent, (
             "the parameters are built once, so the estimate and the search cannot disagree about "
             "which search the price was for"
         )
@@ -335,12 +1071,28 @@ class TestThePageWhileTheSearchRuns:
 
     def test_the_price_is_asked_for_and_shown_before_the_search_is_committed_to(self) -> None:
         script = page_assets()["app.js"]
-        body = script[script.index("async function start(") :]
-        assert body.index(
-            "estimateLine.textContent = costWords(await fetchJSON(`${ESTIMATE_ENDPOINT}"
-        ) < body.index("await watch("), (
-            "inside starting a search, the cost is asked for and put on the page before the "
-            "stream is opened: afterwards it is a receipt rather than a decision"
+        starting = script[script.index("export async function start(") :]
+        starting = starting[: starting.index("\n}")]
+        assert "await showCost(sent)" in starting, (
+            "starting a search puts a price on the page as part of starting it, rather than "
+            "opening the stream and quoting afterwards"
+        )
+        assert starting.index("await showCost(sent)") < starting.index("await watch("), (
+            "inside starting a search, the cost is on screen before the stream is opened: "
+            "afterwards it is a receipt rather than a decision"
+        )
+        assert "const sent = String(parametersToSend());" in starting and "${SEARCH_ENDPOINT}?${sent}" in starting, (
+            "one parameter string is what the price was asked for and what the stream is opened with: "
+            "the form stays editable while a search runs, so reading it twice could quote one search "
+            "and start another"
+        )
+        quoting = script[script.index("async function quoteCost(") :]
+        quoting = quoting[: quoting.index("\n}")]
+        assert "${ESTIMATE_ENDPOINT}?" in quoting, (
+            "and the line it waits for is the server's own answer to that exact parameter string"
+        )
+        assert "estimateLine.textContent = costWords(" in quoting, (
+            "the answer is put on the page by the presentation module, not assembled in the adapter"
         )
 
     def test_the_answer_is_read_as_a_stream_rather_than_waited_for(self) -> None:
@@ -413,23 +1165,42 @@ class TestThePageWhileTheSearchRuns:
             "stopping leaves the list that arrived rather than emptying it"
         )
 
-    def test_pressing_search_again_restarts_rather_than_running_two_searches(self) -> None:
-        """Two streams drawing one list is a page that disagrees with itself about what is running."""
+    def test_pressing_search_again_never_hangs_up_on_the_search_being_read(self) -> None:
+        """Two streams drawing one list is a page that disagrees with itself about what is running.
+
+        It used to be resolved by hanging up on the first search, which was a cancellation wearing
+        a restart's clothes: the reader lost a list without being told. The page refuses instead,
+        so what belongs here is that starting is never allowed to abandon anything by itself, and
+        that the controls say which of the two is happening.
+        """
         script = page_assets()["app.js"]
-        starting = script[script.index("async function start(") :]
-        assert starting.index("abandon();") < starting.index("new AbortController()"), (
-            "the search still being read is hung up on before the next one is asked for"
+        starting = script[script.index("export async function start(") :]
+        starting = starting[: starting.index("\n}")]
+        assert "abandon();" not in starting, (
+            "starting a search does not quietly end the one already running: refusing is what "
+            "says so, and Stop is what does it"
         )
         assert "workingIndicator.hidden = !searching" in script
         assert "stopButton.hidden = !searching" in script, (
             "the stop control appears only while there is something to stop"
         )
-        assert 'startButton.textContent = searching ? "Restart" : "Search"' in script, (
-            "and the same control says what pressing it now means"
+        assert "startButton.disabled = searching" in script, (
+            "and the search control says what pressing it now means, in being unpressable, rather "
+            "than offering to restart a search the reader is watching"
+        )
+        assert 'startButton.textContent = searching' not in script, (
+            "the control keeps its own name: a button relabelled to a different action is the "
+            "same button that has to be refused"
+        )
+        assert '<button id="start-button" type="submit">Search</button>' in page_assets()["index.html"], (
+            "and the name it keeps is the page's, written once in the markup"
         )
         assert "setWorking(true)" in script
         done = script[script.index("function abandon(") :]
-        assert "setWorking(false)" in done
+        assert "setWorking(false)" in done[: done.index("\n}")], (
+            "hanging up puts the controls back, because the search is over the moment the page "
+            "stops reading it"
+        )
         finally_block = starting[starting.index("} finally {") :]
         assert "setWorking(false)" in finally_block, (
             "the controls come back whatever happened: a search that failed and left the page "
@@ -797,18 +1568,23 @@ class TestThePresentationItself:
         assert "409" in words, "and the code, because a person pastes that to somebody else"
 
     def test_a_stream_is_read_line_by_line_without_waiting_for_the_end(self) -> None:
-        """The list can only assemble during the scan if the client reads as it arrives."""
-        [[first, second]] = in_presentation(
+        """The list can only assemble during the scan if the client reads as it arrives.
+
+        The unfinished tail goes in and comes back out, because that is the shape the adapter reads
+        in: exactly one answer per read. It used to return one answer per *argument*, the page took
+        the first of them, and the first was always the leftover tail - so every line the page read
+        was parsed and thrown away, and the list stayed empty during a search that was running fine.
+        """
+        unfinished = '{"type":"progress","sea'
+        first, second = in_presentation(
             "parseStream",
             [
-                [
-                    '{"type":"started","search_id":"a"}\n{"type":"progress","sea',
-                    'rch_id":"a"}\n{"type":"results","results":[]}\n',
-                ]
+                ["", '{"type":"started","search_id":"a"}\n' + unfinished],
+                [unfinished, 'rch_id":"a"}\n{"type":"results","results":[]}\n'],
             ],
         )
         assert [event["type"] for event in first["events"]] == ["started"]
-        assert first["rest"] == '{"type":"progress","sea'
+        assert first["rest"] == unfinished
         assert [event["type"] for event in second["events"]] == ["progress", "results"]
         assert second["rest"] == ""
 
@@ -912,8 +1688,7 @@ class TestTheFrontEndAddsNoDomainLogic:
             "there is no branch on which end is best: the form forwards the choice, and the page "
             "draws the order it was given"
         )
-        sent = source[source.index("function parametersToSend(") :]
-        assert "new FormData(form)" in sent[: sent.index("\n}")], (
+        assert "new FormData(form)" in parameters_of(source), (
             "the parameters leave as the form holds them, which is the only way the direction the "
             "price was quoted for is the direction that runs"
         )

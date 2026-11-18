@@ -93,15 +93,18 @@ export function costWords(event) {
     floor,
     `over ${formatNumber(event.places)} places`,
   ].join(", ");
+  // Which character-difference value is in effect is one of the two things being weighed here - the
+  // other is the floor - and a price quoted for the wrong one is a price for a different search.
+  const askedFor = event.n === undefined || event.n === null ? "" : `${differenceWords(event.n)}, `;
   if (estimate.seconds === null || estimate.seconds === undefined) {
     const basis = estimate.basis ?? "not measured on this machine yet";
-    return `${scope}: ${formatNumber(event.candidate_pairs)} pairs to compare, and ${basis}, so no time to promise`;
+    return `${scope}: ${askedFor}${formatNumber(event.candidate_pairs)} pairs to compare, and ${basis}, so no time to promise`;
   }
   const pace =
     estimate.comparisons_per_second === null || estimate.comparisons_per_second === undefined
       ? ""
       : ` (${formatNumber(Math.round(estimate.comparisons_per_second))} comparisons a second)`;
-  return `${scope}: ${formatNumber(event.candidate_pairs)} pairs to compare, about ${formatDuration(estimate.seconds)}${pace} - ${estimate.basis}`;
+  return `${scope}: ${askedFor}${formatNumber(event.candidate_pairs)} pairs to compare, about ${formatDuration(estimate.seconds)}${pace} - ${estimate.basis}`;
 }
 
 /**
@@ -258,6 +261,76 @@ export function searchingWords(event) {
 }
 
 /**
+ * Which search this is, in as few words as still identify it.
+ *
+ * The character difference and the dataset are what the reader chose; the `search_id` is what
+ * somebody else would need to talk about the same search. When the server has not answered with a
+ * `started` yet there is nothing to name, and the page says so rather than inventing a description.
+ */
+function whichWords(started) {
+  const which = started ?? {};
+  const parts = [];
+  if (which.n !== undefined && which.n !== null) {
+    parts.push(differenceWords(which.n));
+  }
+  if (which.dataset_label) {
+    parts.push(`over ${which.dataset_label}`);
+  }
+  if (which.search_id) {
+    parts.push(`(search ${which.search_id})`);
+  }
+  return parts.length === 0 ? "the search this page started, which the server has not described yet" : parts.join(" ");
+}
+
+/**
+ * How far a search had got, as far as this page knows.
+ *
+ * Only a `progress` event carries `candidate_pairs`, so a list on its own can say what has been
+ * compared without claiming to know what it was out of - which is the truth rather than a rounding
+ * of it, and is the case for a search stopped in its first second.
+ */
+function asFarAsWords(stats) {
+  if (!stats || stats.pairs_compared === undefined || stats.pairs_compared === null) {
+    return "nothing compared yet";
+  }
+  const outOf =
+    stats.candidate_pairs === undefined || stats.candidate_pairs === null
+      ? ""
+      : ` of ${formatNumber(stats.candidate_pairs)}`;
+  const share =
+    stats.share_compared === undefined || stats.share_compared === null
+      ? ""
+      : ` (${Math.round(stats.share_compared * 1000) / 10}% of them)`;
+  const took = formatDuration(stats.elapsed_seconds);
+  return `has compared ${formatNumber(stats.pairs_compared)}${outOf} pairs${share}${
+    took === null ? "" : `, ${took} in`
+  }`;
+}
+
+/**
+ * Why a second search was not started, and what to do about it.
+ *
+ * One search runs at a time on a machine, which the server enforces and the page has to remember
+ * for itself: the browser could always have started a second stream by hanging up on the first, and
+ * used to. The sentence names the running search, says there is no queue to be in, and points at the
+ * control that ends it - because a refusal without a way out is a page that looks broken.
+ */
+export function runningWords(started, latest) {
+  return `A search is already running here: ${whichWords(started)}, which ${asFarAsWords(latest)}. One search runs at a time on this machine, so there is nothing to queue behind: press Stop to hang up on it, then search again.`;
+}
+
+/**
+ * What a stopped search leaves behind.
+ *
+ * The list stays, in the order the search left it, because reading what has been found so far is
+ * usually why a person stops early; the sentence says the scan is over so a still list is not read
+ * as a hung one.
+ */
+export function stoppedWords(started, latest) {
+  return `Stopped: ${whichWords(started)}, which ${asFarAsWords(latest)}. The list on screen is what it had found, in the order the search left it, and nothing more is coming.`;
+}
+
+/**
  * A refusal, in the server's own sentence.
  *
  * The page adds no diagnosis of its own: the message from the API already names the search in
@@ -273,31 +346,26 @@ export function refusalWords(status, payload) {
 }
 
 /**
- * Read a streamed search a chunk at a time.
+ * Read one chunk of a search stream, carrying the unfinished tail in and out.
  *
- * Each argument is one chunk as it arrived; the leftover tail of one is carried into the next,
- * so a record split across two network reads is still one record. The list can only assemble
- * during the scan if the client reads as the bytes arrive rather than waiting for the body to
- * end, and this is where that happens. The return is one `{ events, rest }` per chunk, `rest`
- * being what the next chunk has to finish.
+ * `pending` is what the previous read left half-written (empty string for the first read) and
+ * `rest` is what this one leaves; the caller keeps it and hands it back with the next chunk. A
+ * record split across two network reads is one record, and the caller cannot get that wrong by
+ * accident: there is exactly one answer per read, so there is no second element to pick by mistake
+ * and quietly throw the read away. The list can only assemble during the scan if the client reads
+ * as the bytes arrive rather than waiting for the body to end, and this is where that happens.
  */
-export function parseStream(...chunks) {
-  let pending = "";
-  const read = [];
-  for (const chunk of chunks) {
-    pending += chunk;
-    const lines = pending.split("\n");
-    pending = lines.pop() ?? "";
-    const events = [];
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed !== "") {
-        events.push(JSON.parse(trimmed));
-      }
+export function parseStream(pending, chunk) {
+  const lines = `${pending ?? ""}${chunk ?? ""}`.split("\n");
+  const rest = lines.pop() ?? "";
+  const events = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed !== "") {
+      events.push(JSON.parse(trimmed));
     }
-    read.push({ events, rest: pending });
   }
-  return read;
+  return { events, rest };
 }
 
 /**

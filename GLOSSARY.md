@@ -178,6 +178,12 @@ Reading a search's stream while it happens, from a terminal or a browser, and st
 hanging up.
 _Avoid_: tailing, following, live view
 
+**One search at a time**:
+One machine, one scan: a second search is refused where it stands — by the server, with its own
+409, and by the page, before the request is made. Neither refusal is a queue and neither is a
+restart: each says which search is running, how far it has got, and what ends it.
+_Avoid_: concurrency limit, queue (for this), conflict error (in prose), restart
+
 ### On the map
 
 **Leading find**:

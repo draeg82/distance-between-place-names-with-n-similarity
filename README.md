@@ -197,13 +197,20 @@ uv run distnsimilarity-serve --data-dir .      # 127.0.0.1:8000, and open that a
 
 The form is everywhere mode: a character-difference value, a dataset, an optional population
 floor, a direction and a list size - the same parameters the watcher takes, with the dataset
-choices and their wording read from `/v1/datasets` rather than written into the page. The cost
-of the search is printed before the stream opens; the working indicator and the progress line
-say what the scan is doing while it does it; the best-so-far list is replaced whole every time
-the server sends a better one, in place, without a refresh. Stop hangs up on the stream, which
-is how this API is told to cancel, and the list on screen stays as what was found so far. A
-search that matches nothing says so with the parameters it used, because "nothing over every
-place in the database" and "nothing over towns of 5,000" are different findings.
+choices and their wording read from `/v1/datasets` rather than written into the page. The price
+of a search is asked of `/v1/estimate` as those choices are made, so it is on screen before the
+stream opens rather than after it: the sentence names the floor and the character difference it
+was priced at, and a parameter string that already has a price is not counted twice. A search can
+be stopped while it runs, which hangs up on the stream - the only way this API is told to cancel -
+and the list on screen stays as what was found so far, with a line saying nothing more is coming.
+One search runs per page and one scan per machine, so a second Search while one is running is
+refused rather than queued or restarted: the refusal says which search is running, how far it has
+got, and that Stop is the way out. Changing the parameters and searching again is the same page -
+nothing reloads, so the list, the map and the price are still there to compare the next answer
+with. The working indicator and the progress line say what the scan is doing while it does it; the
+best-so-far list is replaced whole every time the server sends a better one, in place, without a
+refresh. A search that matches nothing says so with the parameters it used, because "nothing over
+every place in the database" and "nothing over towns of 5,000" are different findings.
 
 The map underneath the form draws the same list. The leading find is the bold arc and every other
 find is faint behind it; the arcs come from the latitudes and longitudes the `results` events

@@ -9,8 +9,10 @@
  * where the words come from.
  *
  * Nothing is sorted, filtered, measured or compared here, and the page is never reloaded to
- * start, restart or stop a search: hanging up the connection is how this API is told to stop,
- * so `AbortController` is the stop control and pressing Search again is a restart.
+ * start, stop or search again: hanging up the connection is how this API is told to stop, so
+ * `AbortController` is the stop control. One search runs at a time, so pressing Search while one is
+ * running is refused in words - what is running, how far it has got, and that Stop is the way out -
+ * rather than quietly cancelling the search the reader was watching.
  *
  * The map is drawn from the same `results` events as the table, on requestAnimationFrame, and it
  * is given the finds in the order they arrived: which pair is bold is the API's ranking, and which
@@ -31,7 +33,9 @@ import {
   progressWords,
   refusalWords,
   rowCells,
+  runningWords,
   searchingWords,
+  stoppedWords,
 } from "./results.js";
 import { landPaths, loadOutline, paint, sceneOf } from "./map.js";
 
@@ -75,6 +79,35 @@ let arcCaption = null;
 let running = null;
 let echo = null;
 
+/**
+ * The newest thing this server has said about the running search.
+ *
+ * Kept for the sentence that refuses a second search: a refusal is only useful if it describes the
+ * search in the way - how far it has got, and how long it has been taking - so it needs the same
+ * numbers the status line is living off rather than another look at the server.
+ */
+let latest = null;
+
+/**
+ * The price currently on screen and the parameters it was quoted for.
+ *
+ * `costFor` is what makes the sentence safe: it is the parameter string the server answered, so
+ * the page can tell "the price of the search about to run" from "the price of the one before it",
+ * and can leave a reply on the floor when a newer change has overtaken it.
+ */
+let cost = null;
+let costFor = "";
+
+/**
+ * The parameters a price is being asked for right now, and that request.
+ *
+ * Two of them, because a person typing a number fires an event per keystroke: `costAsked` stops the
+ * same count being asked for twice, and `costPending` lets a pressed Search wait for the price that
+ * is already on its way instead of opening a stream one frame before the number appears.
+ */
+let costAsked = "";
+let costPending = null;
+
 /** What the map is showing: the running list, which row of it is bold, and how far that arc is drawn. */
 let finds = [];
 let focus = 0;
@@ -97,7 +130,13 @@ function setMessage(words) {
 function setWorking(searching) {
   workingIndicator.hidden = !searching;
   stopButton.hidden = !searching;
-  startButton.textContent = searching ? "Restart" : "Search";
+  // The search control goes disabled rather than being relabelled "Restart": one search runs at a
+  // time, so a press now would mean throwing away the search being watched, and a button should not
+  // invite that. Stop is the way out, and it is the control that appears instead.
+  //
+  // Disabling it is not the whole refusal, and cannot be: Enter in a text field submits a form
+  // whether or not the button can be pressed, so `start` says the refusal in words as well.
+  startButton.disabled = searching;
   document.body.classList.toggle("searching", searching);
 }
 
@@ -154,6 +193,71 @@ function messageFor(error) {
     return error.message;
   }
   return `Could not reach this server: ${error}`;
+}
+
+/**
+ * Ask this server what the parameters on screen would cost, and put the answer where the decision
+ * is made.
+ *
+ * The estimate is the one number a person can decide with before a two-minute scan, so it is asked
+ * for as the parameters are chosen rather than only when Search is pressed: by the time the button
+ * is pressed the price should already have been read. A reply is dropped if the parameters have
+ * moved on while it was in flight, because a price for the wrong search is worse than none.
+ *
+ * The count behind `candidate_pairs` is not free, so a parameter string that already has a price on
+ * screen is not asked about twice.
+ */
+async function quoteCost(sent) {
+  try {
+    const priced = await fetchJSON(`${ESTIMATE_ENDPOINT}?${sent}`);
+    if (sent !== costAsked) {
+      return;
+    }
+    cost = priced;
+    costFor = sent;
+    estimateLine.textContent = costWords(priced);
+  } catch (error) {
+    if (sent !== costAsked) {
+      return;
+    }
+    cost = null;
+    costFor = "";
+    estimateLine.textContent = `No price to show: ${messageFor(error)}`;
+  } finally {
+    if (sent === costAsked) {
+      costAsked = "";
+      costPending = null;
+    }
+  }
+}
+
+/**
+ * Make sure the price of these exact parameters is the sentence on screen.
+ *
+ * The caller names the parameters being priced rather than letting this read the form, because the
+ * form is editable while a search runs: the string a search was started with is the one its price
+ * has to be, even if a keystroke lands while the answer is on its way back.
+ */
+async function showCost(sent) {
+  if (cost !== null && costFor === sent) {
+    estimateLine.textContent = costWords(cost);
+    return;
+  }
+  if (costPending !== null && costAsked === sent) {
+    await costPending;
+    return;
+  }
+  costAsked = sent;
+  estimateLine.textContent = "Asking this server what that search would cost...";
+  costPending = quoteCost(sent);
+  await costPending;
+}
+
+/** The parameters are only worth costing again while the page is deciding what to search for. */
+function parametersChanged() {
+  if (running === null) {
+    void showCost(String(parametersToSend()));
+  }
 }
 
 function clearRows() {
@@ -356,15 +460,18 @@ function showList(event) {
 function handle(event) {
   if (event.type === "started") {
     echo = event;
+    latest = event;
     estimateLine.textContent = costWords(event);
     setStatus(searchingWords(event));
     return;
   }
   if (event.type === "progress") {
+    latest = event;
     progressLine.textContent = progressWords(event);
     return;
   }
   if (event.type === "results") {
+    latest = event;
     showList(event);
     return;
   }
@@ -388,9 +495,9 @@ function handle(event) {
 /**
  * Read a search stream while it happens.
  *
- * `parseStream` carries the unfinished tail between reads, so a record split across two chunks is
- * still one record; each finished line is drawn before the next read is awaited, which is what
- * keeps the list assembling during the scan instead of after it.
+ * `parseStream` takes the unfinished tail of the previous read and hands back the tail of this one,
+ * so a record split across two reads is still one record; each finished line is drawn before the
+ * next read is awaited, which is what keeps the list assembling during the scan instead of after it.
  */
 async function watch(url, signal) {
   const response = await fetch(url, { signal });
@@ -406,9 +513,9 @@ async function watch(url, signal) {
     if (read.done) {
       return;
     }
-    const [chunk] = parseStream(pending, decoder.decode(read.value, { stream: true }));
-    pending = chunk.rest;
-    for (const event of chunk.events) {
+    const lines = parseStream(pending, decoder.decode(read.value, { stream: true }));
+    pending = lines.rest;
+    for (const event of lines.events) {
       handle(event);
     }
   }
@@ -431,26 +538,41 @@ function abandon() {
   return true;
 }
 
-async function start(event) {
-  event.preventDefault();
-  // One search runs per server, so pressing Search while one runs means hanging up on the old
-  // one first: that stops its scan here rather than leaving it running and being refused.
-  abandon();
+/**
+ * Start a search - or refuse, if one is already running here.
+ *
+ * This server runs one search at a time, and the page runs one search per tab, so a second press
+ * cannot be honoured by queueing it. It used to be honoured by hanging up on the first search, which
+ * looked like a restart and was a cancellation: the reader lost the list and the scan they had been
+ * watching, with nothing saying so. A press now says why it did nothing and what to do about it.
+ *
+ * The page never reloads, so changing the parameters and searching again is one press after this one
+ * has ended - and the scan that was running is finished or stopped by then, not orphaned.
+ */
+export async function start(event) {
+  event?.preventDefault?.();
+  if (running !== null) {
+    setMessage(runningWords(echo, latest));
+    return;
+  }
   const controller = new AbortController();
   running = controller;
 
   echo = null;
+  latest = null;
   // After the echo is cleared, so the map's caption says "no search yet" rather than claiming this
   // one has already found nothing.
   clearRows();
   setMessage("");
   progressLine.textContent = "";
   setWorking(true);
-  const sent = parametersToSend();
-  estimateLine.textContent = "Asking this server what that search would cost...";
+  const sent = String(parametersToSend());
+  // The price is shown before the stream opens, but it is not asked for twice: the same sentence is
+  // already on screen if the parameters have not moved since it was quoted. One parameter string
+  // pays for this search and runs it, so a keystroke cannot split the two.
+  await showCost(sent);
 
   try {
-    estimateLine.textContent = costWords(await fetchJSON(`${ESTIMATE_ENDPOINT}?${sent}`));
     await watch(`${SEARCH_ENDPOINT}?${sent}`, controller.signal);
     if (messageLine.textContent === "") {
       setStatus("The server closed the stream before saying it had finished");
@@ -466,15 +588,30 @@ async function start(event) {
     if (running === controller) {
       running = null;
       setWorking(false);
+      // The parameters may have moved while the search was running, and the price on screen is meant
+      // to be the price of the search about to run, so it is worth another look now the page is idle.
+      parametersChanged();
     }
   }
 }
 
-function stop(event) {
-  event.preventDefault();
+/**
+ * Hang up on the running search, and say what is left on screen.
+ *
+ * The list is what had been found: stopping early is usually how a person reads a scan that is
+ * already good enough, so emptying it would throw away the reason for stopping.
+ */
+export function stop(event) {
+  event?.preventDefault?.();
+  const found = echo;
+  const asFarAsItGot = latest;
   if (abandon()) {
     setStatus("Stopped");
-    setMessage("Search stopped. The list on screen is what it had found.");
+    setMessage(stoppedWords(found, asFarAsItGot));
+  } else {
+    // Nothing is running, so the status keeps saying what the last search did: overwriting "Search
+    // finished" with a word about idleness would destroy the answer that is already there.
+    setMessage("There is no search running here to stop.");
   }
 }
 
@@ -516,6 +653,11 @@ function wireUpPage() {
   form.addEventListener("submit", (event) => {
     void start(event);
   });
+  // One listener for the whole form: every field on it is a parameter, and a parameter is worth a
+  // price the moment it is chosen. Both events, because typing is one and choosing from a menu is
+  // the other; a repeat of a parameter string already priced is answered from `costFor`.
+  form.addEventListener("input", parametersChanged);
+  form.addEventListener("change", parametersChanged);
   stopButton.addEventListener("click", stop);
 
   // One pair of listeners for a table whose rows are replaced wholesale several times a second.
@@ -530,7 +672,9 @@ function wireUpPage() {
 
   showCaption();
   void fillCoastline();
-  void fillDatasetChoices();
+  // The dataset choices first, because the dataset is one of the parameters the price is quoted
+  // for: a price asked before the menu is filled is a price for the wrong search.
+  void fillDatasetChoices().then(() => showCost(String(parametersToSend())));
 }
 
 // The page wires itself up when there is one. The functions above are what the tests call, and

@@ -129,6 +129,11 @@ def run_in_node(script: str, *arguments: str) -> Any:
         text=True,
         timeout=60,
         check=False,
+        # Node treats an unread standard input as a stream to wait for, and descriptor 0 belongs to
+        # whatever is running the suite - a terminal, a CI job, another process capturing this
+        # process's output. Asking for none of it is the difference between a test that runs and a
+        # suite that appears to have hung.
+        stdin=subprocess.DEVNULL,
     )
     assert completed.returncode == 0, (
         f"the front end's module did not run: {completed.stderr.strip()}"
@@ -266,3 +271,482 @@ def paint_scene(
 def asked(calls: list[tuple[str, list[Any]]], name: str) -> list[list[Any]]:
     """The arguments of every call to one method, in the order they happened."""
     return [arguments for called, arguments in calls if called == name]
+
+
+#: A page to wire the adapter onto, and a server that says exactly what a test told it to.
+#:
+#: `app.js` is a thin layer over two things it gets from a browser: a document, and `fetch`. Hand
+#: it a stand-in for both and the whole control surface - start, stop, restart, refuse - becomes
+#: something a test can drive and then ask questions about, which is the only way "pressing Search
+#: twice does not start two searches" and "stopping keeps the list" can be asserted at all. Nothing
+#: is mocked inside the module: the fake ends at the same two boundaries a browser would provide,
+#: and every answer it gives is a real `/v1/...` body from `tests/test_http_search.py`'s shape.
+#:
+#: A stream is a list of chunks; each chunk is a list of events to deliver on one read, or the
+#: string ``"hold"``, which stops the stream there until the test releases it or hangs up on it.
+#: That pause is the whole point: without it there is no such thing as "while a search is running".
+PAGE_SCRIPT = """
+import { pathToFileURL } from "node:url";
+
+const modulePath = process.argv[1];
+const plan = JSON.parse(process.argv[2]);
+
+class Element {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentElement = null;
+    this.dataset = {};
+    this.style = {};
+    this.classes = new Set();
+    this.listeners = new Map();
+    this.textContent = "";
+    this.className = "";
+    this.title = "";
+    this.hidden = false;
+    this.disabled = false;
+    this.value = "";
+    this.name = "";
+    this.type = "";
+    this.clientWidth = 1000;
+    this.width = 1000;
+    this.height = 500;
+    this.tabIndex = -1;
+    const self = this;
+    this.classList = {
+      add: (one) => self.classes.add(one),
+      remove: (one) => self.classes.delete(one),
+      contains: (one) => self.classes.has(one),
+      toggle: (one, on) => {
+        const wanted = on === undefined ? !self.classes.has(one) : Boolean(on);
+        if (wanted) {
+          self.classes.add(one);
+        } else {
+          self.classes.delete(one);
+        }
+        return wanted;
+      },
+    };
+  }
+
+  append(...nodes) {
+    for (const node of nodes) {
+      node.parentElement = this;
+    }
+    this.children.push(...nodes);
+  }
+
+  appendChild(node) {
+    this.append(node);
+    return node;
+  }
+
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+
+  addEventListener(kind, handler) {
+    if (!this.listeners.has(kind)) {
+      this.listeners.set(kind, []);
+    }
+    this.listeners.get(kind).push(handler);
+  }
+
+  dispatch(kind, event = {}) {
+    for (const handler of this.listeners.get(kind) ?? []) {
+      handler({ type: kind, target: this, preventDefault() {}, ...event });
+    }
+  }
+
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (node.tagName === selector.toUpperCase()) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  contains(node) {
+    let one = node;
+    while (one) {
+      if (one === this) {
+        return true;
+      }
+      one = one.parentElement;
+    }
+    return false;
+  }
+
+  getContext() {
+    return new Proxy(
+      {},
+      {
+        get: (stored, name) => (name in stored ? stored[name] : () => undefined),
+        set: (stored, name, value) => {
+          stored[name] = value;
+          return true;
+        },
+      },
+    );
+  }
+}
+
+// Every string each element was ever given, in order. A test that asks "did the page ever say
+// it had finished?" is asking about the whole history of a line, not about whatever happens to be
+// on screen when the test stops looking, and a stopped search's last line is exactly the case
+// where the two differ.
+const written = new Map();
+
+const ids = new Map();
+const id = (name) => {
+  if (!ids.has(name)) {
+    const tag = name.includes("button") ? "button" : name === "world-map" ? "canvas" : "p";
+    const made = new Element(tag);
+    made.id = name;
+    const history = [];
+    written.set(name, history);
+    let text = "";
+    Object.defineProperty(made, "textContent", {
+      get: () => text,
+      set: (value) => {
+        text = String(value);
+        history.push(text);
+      },
+    });
+    ids.set(name, made);
+  }
+  return ids.get(name);
+};
+
+const form = id("search-form");
+form.tagName = "FORM";
+const fields = new Map();
+for (const [name, value] of Object.entries(plan.parameters ?? {})) {
+  const field = new Element("input");
+  field.name = name;
+  field.value = String(value);
+  field.type = name === "dataset" || name === "direction" ? "select-one" : "number";
+  fields.set(name, field);
+}
+Object.defineProperty(form, "elements", {
+  get: () => [...fields.values(), id("start-button"), id("stop-button")],
+});
+
+/**
+ * The browser's own form-to-pairs, over the stand-in form's fields.
+ *
+ * `app.js` forwards the form with `new FormData(form)`, which is a browser facility rather than
+ * something the module owns, so it is the stand-in's job to provide it. Like the real thing it
+ * yields every named field that holds text, including the ones left empty - the empty ones are how
+ * "a population floor nobody typed" reaches the page's own filter rather than the query string -
+ * and it skips the controls with no name, which are buttons and not parameters.
+ */
+globalThis.FormData = class FormData {
+  constructor(theForm) {
+    const pairs = Array.from(theForm?.elements ?? [])
+      .filter((field) => String(field.name ?? "") !== "" && typeof field.value === "string")
+      .map((field) => [String(field.name), field.value]);
+    this[Symbol.iterator] = () => pairs[Symbol.iterator]();
+  }
+};
+
+id("world-map").clientWidth = 1000;
+
+const document = {
+  body: new Element("body"),
+  createElement: (tag) => new Element(tag),
+  getElementById: id,
+  addEventListener() {},
+};
+
+/** The text a person reading this node would read, however the markup is nested under it. */
+function textOf(node) {
+  return node.children.length === 0 ? node.textContent : node.children.map(textOf).join("");
+}
+
+/** One answer the adapter asked for, and whether the caller hung up on it. */
+const calls = [];
+const streams = [];
+let streamIndex = 0;
+
+const abortError = () => Object.assign(new Error("This stream was hung up on"), { name: "AbortError" });
+const encoder = new TextEncoder();
+
+function streamBody(chunks, signal) {
+  const queue = [...chunks];
+  let released = null;
+  const stream = {
+    release() {
+      const resolve = released;
+      released = null;
+      if (resolve) {
+        resolve();
+        return true;
+      }
+      return false;
+    },
+  };
+  async function read() {
+    if (signal?.aborted) {
+      throw abortError();
+    }
+    if (queue.length === 0) {
+      return { done: true, value: undefined };
+    }
+    const [next] = queue;
+    if (next === "hold") {
+      queue.shift();
+      await new Promise((resolve, reject) => {
+        released = resolve;
+        const onAbort = () => reject(abortError());
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+      return read();
+    }
+    queue.shift();
+    // A chunk is either a list of events, which is encoded the way the server encodes them, or text
+    // exactly as this test wants it to arrive - which is how a test cuts a record in half.
+    const text = typeof next === "string" ? next : next.map((event) => JSON.stringify(event)).join("\\n") + "\\n";
+    return { done: false, value: encoder.encode(text) };
+  }
+  return { stream, reader: { read, cancel() {} } };
+}
+
+function jsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return structuredClone(body);
+    },
+  };
+}
+
+/**
+ * A scripted answer that echoes what was asked, the way `/v1/estimate` really does.
+ *
+ * Any value written as `"@query"` is replaced by that parameter from the request, so a test can
+ * say "this server answers with the parameters it was given" once and then watch the page change
+ * the parameters. A parameter the page left out is left out of the answer too, which is how a
+ * missing population floor stays missing rather than becoming a zero.
+ */
+function fillFromQuery(body, query) {
+  const sent = Object.fromEntries(new URLSearchParams(query));
+  const counted = new Set(["n", "top_k", "min_population"]);
+  const filled = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (value !== "@query") {
+      filled[key] = value;
+    } else if (key in sent) {
+      filled[key] = counted.has(key) ? Number(sent[key]) : sent[key];
+    }
+  }
+  return filled;
+}
+
+globalThis.document = document;
+globalThis.window = { addEventListener() {} };
+globalThis.matchMedia = () => ({ matches: plan.reduceMotion !== false });
+
+/**
+ * A page that has never reloaded, and would notice if it did.
+ *
+ * "Changing the parameters and searching again needs no page reload" is only an assertion if the
+ * stand-in browser keeps score: a script that set `location.href` or called `reload()` would get a
+ * fresh page in a real browser, wiping the list and the price with it, and here it gets recorded.
+ */
+let reloaded = false;
+globalThis.location = {
+  reload() {
+    reloaded = true;
+  },
+  assign() {
+    reloaded = true;
+  },
+  get href() {
+    return "http://127.0.0.1:8000/";
+  },
+  set href(value) {
+    reloaded = true;
+  },
+};
+
+globalThis.fetch = async (url, options) => {
+  const target = String(url);
+  const signal = options?.signal ?? null;
+  const asked = { url: target, path: target.split("?")[0], query: target.split("?")[1] ?? "", aborted: false };
+  calls.push(asked);
+  if (signal?.aborted) {
+    // A browser never sends a request whose signal is already aborted, so neither does this one -
+    // which is what makes "the page hung up on every stream it opened" mean something.
+    asked.aborted = true;
+    throw abortError();
+  }
+  signal?.addEventListener("abort", () => {
+    asked.aborted = true;
+  });
+  if (asked.path === "/v1/search") {
+    const chunks = plan.streams?.[streamIndex] ?? [];
+    streamIndex += 1;
+    const { stream, reader } = streamBody(chunks, signal);
+    streams.push(stream);
+    return { ok: true, status: 200, json: async () => ({}), body: { getReader: () => reader } };
+  }
+  const answer = (plan.json ?? {})[asked.path];
+  if (answer === undefined) {
+    return jsonResponse({ error: "NotServed", message: `this test server does not serve ${asked.path}` }, 404);
+  }
+  if (typeof answer?.status === "number" && answer.status >= 400) {
+    return jsonResponse(fillFromQuery(answer.body ?? {}, asked.query), answer.status);
+  }
+  return jsonResponse(fillFromQuery(answer ?? {}, asked.query));
+};
+
+const adapter = await import(pathToFileURL(modulePath).href);
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+const page = {
+  calls,
+  lines: () => ({
+    database: id("database-line").textContent,
+    estimate: id("estimate-line").textContent,
+    status: id("status-text").textContent,
+    message: id("message-line").textContent,
+    progress: id("progress-line").textContent,
+    caption: id("arc-caption").textContent,
+  }),
+  urls: () => calls.map((one) => one.url),
+  askedFor: (path) => calls.filter((one) => one.path === path).map((one) => one.query),
+  /**
+   * The rows on screen, as a person reads them across.
+   *
+   * One string per row, the cells joined: what a page test has to be able to ask about a finding is
+   * that both names, both countries, the kilometres and the difference are in the row a reader would
+   * be looking at. A name cell holds its text in spans (that is what the highlighting is), so this
+   * reads the whole run of text under each cell rather than only what sits directly on it.
+   */
+  rows: () => id("result-rows").children.map((row) => row.children.map(textOf).join(" | ")),
+  wrote: (name) => written.get(name) ?? [],
+  reloaded: () => reloaded,
+  /** Every `/v1/search` this page asked for, and whether it hung up on that one. */
+  searches: () =>
+    calls
+      .filter((one) => one.path === "/v1/search")
+      .map((one) => ({ query: one.query, aborted: one.aborted })),
+  tableHidden: () => id("results-table").hidden,
+  controls: () => ({
+    searching: document.body.classList.contains("searching"),
+    startDisabled: id("start-button").disabled,
+    stopHidden: id("stop-button").hidden,
+    indicatorHidden: id("working-indicator").hidden,
+    fieldsDisabled: [...fields.values()].every((field) => field.disabled),
+  }),
+  press: (name) => {
+    // A real click on the search button is a form submit, and a real click on Stop is a click on
+    // that button: this goes through the listeners the page wired up, not through the module.
+    if (name === "start-button") {
+      form.dispatch("submit", { preventDefault() {} });
+      return;
+    }
+    id(name).dispatch("click", { preventDefault() {} });
+  },
+  parameters: (values) => {
+    for (const [name, value] of Object.entries(values)) {
+      if (!fields.has(name)) {
+        const field = new Element("input");
+        field.name = name;
+        field.type = "number";
+        fields.set(name, field);
+      }
+      fields.get(name).value = String(value);
+    }
+    form.dispatch("input");
+    form.dispatch("change");
+  },
+  async settle(rounds = 8) {
+    for (let round = 0; round < rounds; round += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  },
+  release(every = 4) {
+    for (let one = 0; one < every; one += 1) {
+      streams.some((stream) => stream.release());
+    }
+  },
+  start() {
+    if (typeof adapter.start !== "function") {
+      throw new Error("app.js does not export a start control for the test to press");
+    }
+    return adapter.start({ preventDefault() {} });
+  },
+  stop() {
+    if (typeof adapter.stop !== "function") {
+      throw new Error("app.js does not export a stop control for the test to press");
+    }
+    return adapter.stop({ preventDefault() {} });
+  },
+};
+
+let result;
+try {
+  result = await new Function("page", `"use strict"; return (async () => { ${process.argv[3]} })();`)(page);
+} catch (error) {
+  process.stderr.write(`${error && error.stack ? error.stack : error}\\n`);
+  process.exitCode = 1;
+  result = null;
+}
+process.stdout.write(JSON.stringify(result ?? null));
+"""
+
+
+DEFAULT_PAGE_JSON: dict[str, Any] = {
+    "/v1/datasets": {
+        "database": {"path": "/tmp/places.sqlite3", "present": True, "places": 4210, "imported": True},
+        "datasets": [
+            {
+                "threshold": None,
+                "label": "every place in the database",
+                "places": 4210,
+                "candidate_pairs": 8_860_000,
+            },
+            {
+                "threshold": 5000,
+                "label": "cities of 5,000 or more people",
+                "places": 120,
+                "candidate_pairs": 7_140,
+            },
+        ],
+    },
+    "/static/world-outline.json": {"rings": []},
+}
+
+
+def drive_page(
+    body: str,
+    *,
+    json_bodies: dict[str, Any] | None = None,
+    streams: list[list[Any]] | None = None,
+    parameters: dict[str, Any] | None = None,
+    reduce_motion: bool = True,
+    module: Path = APP_JS,
+) -> Any:
+    """Press the page's own controls against a scripted server, and report what the page came to.
+
+    `body` is the test, written in JavaScript against the `page` object: press, wait, look. It
+    returns a plain object, which comes back here as a `dict` for the assertions to read.
+    """
+    plan = {
+        "json": {**DEFAULT_PAGE_JSON, **(json_bodies or {})},
+        "streams": streams or [],
+        "parameters": parameters or {"n": 1, "dataset": "5000", "direction": "greatest", "top_k": 50},
+        "reduceMotion": reduce_motion,
+    }
+    return run_in_node(PAGE_SCRIPT, str(module), json.dumps(plan), body)
