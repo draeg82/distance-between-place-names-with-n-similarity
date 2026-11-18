@@ -1,8 +1,9 @@
 """The browser front end: what it asks the API for, and what it must never do for itself.
 
 There is no browser in this suite, so the contract is held from both ends. From the server:
-the page and its two assets are served, and every field the page renders exists on a real
-streamed search (`THE_WIRE` below is checked against events, not against a comment). From the
+the page, its scripts, its stylesheet and its coastline are served, and every field the page
+renders exists on a real streamed search (`THE_WIRE` below is checked against events, not against
+a comment). From the
 source: the presentation half of the front end is a module of pure functions, and the marking of
 a name is one exported function of the adapter, both of which Node runs directly where it is
 installed - so "the differing characters are highlighted" and "a search that found nothing says
@@ -18,25 +19,27 @@ in the page is a second answer to the same question.
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from distnsimilarity.core.matching import differing_position_indexes
 from http_support import events_of, serve
+from browser_support import (
+    APP_JS,
+    BANNED,
+    MAP_JS,
+    MEASURED_ASSETS,
+    RESULTS_JS,
+    in_presentation,
+    in_the_adapter,
+    page_assets,
+)
 from support import dump_row, place_database
-
-STATIC = Path(__file__).resolve().parent.parent / "src" / "distnsimilarity" / "api" / "static"
-HTML = STATIC / "index.html"
-APP_JS = STATIC / "app.js"
-RESULTS_JS = STATIC / "results.js"
-STYLES = STATIC / "styles.css"
 
 #: Every field the front end reads, by where it reads it from. Kept as data so the two tests
 #: below can check it in both directions: the API really sends it, and the page really reads it.
@@ -93,38 +96,6 @@ THE_WIRE: dict[str, list[str]] = {
     "an error event": ["message"],
 }
 
-#: Everything a page is allowed to contain without the API's say-so. Trig, powers and a square
-#: root together are a distance formula; `differing_positions:` and `character_difference:`
-#: written by the page are a second opinion about what a pair looks like; `http` in a `src` or
-#: `href` is somebody else's server in the middle of a tool that runs on one laptop.
-BANNED = (
-    "Math.sqrt",
-    "Math.pow",
-    "Math.hypot",
-    "Math.sin",
-    "Math.cos",
-    "Math.tan",
-    "Math.asin",
-    "Math.acos",
-    "Math.atan",
-    "6371",
-    "haversine",
-    "great_circle",
-    "levenshtein",
-    "differing_positions:",
-    "character_difference:",
-    "distance_km:",
-)
-
-
-def page_assets() -> dict[str, str]:
-    """The four files the front end is made of, by name."""
-    assert STATIC.is_dir(), f"the front end should live in {STATIC}"
-    assets = {"index.html": HTML, "app.js": APP_JS, "results.js": RESULTS_JS, "styles.css": STYLES}
-    missing = [name for name, path in assets.items() if not path.is_file()]
-    assert not missing, f"the front end is missing {missing}"
-    return {name: path.read_text(encoding="utf-8") for name, path in assets.items()}
-
 
 def corrupt_one_place(database: Path, geonameid: int) -> None:
     """Make one stored row not a place, which is the only way an `error` event ever happens.
@@ -175,95 +146,6 @@ def every_field_on_the_wire(tmp_path: Path) -> set[str]:
     return seen
 
 
-#: Read one exported function of `results.js` by name, apply it to each case in turn, and print
-#: the results as JSON. `process.argv` carries the module, the function and the cases, because a
-#: JSON payload interpolated into a JavaScript literal is a quoting bug waiting to be found.
-PRESENTATION_SCRIPT = """
-import { pathToFileURL } from "node:url";
-const presentation = await import(pathToFileURL(process.argv[1]).href);
-const underTest = presentation[process.argv[2]];
-const cases = JSON.parse(process.argv[3]);
-process.stdout.write(JSON.stringify(cases.map((sent) => underTest(...sent))));
-"""
-
-
-def run_in_node(script: str, *arguments: str) -> Any:
-    """Run a snippet with Node and read the JSON it prints.
-
-    Node is a developer's tool here, not a dependency: where it is not installed the tests that
-    need it skip, and `uv run pytest` still means one command on a machine with only the
-    packages in `pyproject.toml`.
-    """
-    if shutil.which("node") is None:
-        pytest.skip("the presentation module is checked with Node, which is not installed here")
-    completed = subprocess.run(
-        ["node", "--input-type=module", "-e", script, *arguments],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert completed.returncode == 0, (
-        f"the front end's presentation module did not run: {completed.stderr.strip()}"
-    )
-    return json.loads(completed.stdout.strip())
-
-
-def in_presentation(function: str, cases: list[list[object]]) -> list[object]:
-    """Apply one exported function of `results.js` to each case, where a case is one call's arguments.
-
-    One case per call rather than one big call, because most of these functions are asked about
-    one event, and `formatNumber` is asked twice in one test; `[[one, two]]` is how a function of
-    two arguments - `emptyWords`, `refusalWords` - is given them.
-    """
-    return run_in_node(
-        PRESENTATION_SCRIPT, str(RESULTS_JS), function, json.dumps(cases)
-    )
-
-
-#: `nameCell` turns data into elements, and Node has no page to make them from, so the check that
-#: the highlight reaches the page brings its own stand-in document. It offers the three things the
-#: marking uses - make an element, append to it, set its text - on purpose: an implementation that
-#: needed more of a browser would be a sign the marking is no longer one small function's job.
-ADAPTER_SCRIPT = """
-import { pathToFileURL } from "node:url";
-const adapter = await import(pathToFileURL(process.argv[1]).href);
-const underTest = adapter[process.argv[2]];
-const cases = JSON.parse(process.argv[3]);
-
-function element(tag) {
-  return {
-    tagName: tag,
-    children: [],
-    className: "",
-    title: "",
-    textContent: "",
-    dataset: {},
-    append(...nodes) {
-      this.children.push(...nodes);
-    },
-  };
-}
-
-function describe(node) {
-  return {
-    tag: node.tagName,
-    class: node.className,
-    title: node.title,
-    text: node.textContent,
-    children: node.children.map(describe),
-  };
-}
-
-const page = { createElement: element };
-const made = cases.map((sent) => underTest(...sent, page));
-process.stdout.write(JSON.stringify(made.map(describe)));
-"""
-
-
-def in_the_adapter(function: str, cases: list[list[object]]) -> list[object]:
-    """Apply one exported function of `app.js` to each case, with the stand-in document last."""
-    return run_in_node(ADAPTER_SCRIPT, str(APP_JS), function, json.dumps(cases))
 
 
 class TestThePageIsServed:
@@ -982,7 +864,14 @@ class TestTheFrontEndAddsNoDomainLogic:
     """AC: "all matching and ranking come from the API"."""
 
     def test_the_page_never_measures_anything(self) -> None:
-        for name, text in page_assets().items():
+        """Every page file except the map, which is exempt from the trig and says why.
+
+        `map.js` interpolates a great circle, and that needs `Math.cos` and friends. What it must
+        not do is turn coordinates into a length, so `tests/test_browser_map.py` holds it to a
+        narrower list of its own - no Earth radius, no kilometres, no reading of `distance_km`.
+        """
+        for name in MEASURED_ASSETS:
+            text = page_assets()[name]
             found = [token for token in BANNED if token in text]
             assert found == [], (
                 f"{name} contains {found}: a distance, a name comparison or a place count "
@@ -1036,11 +925,11 @@ class TestTheFrontEndAddsNoDomainLogic:
             "the page must not ask which source to read: the place database is the only one"
         )
 
-    @pytest.mark.parametrize("name", ["app.js", "results.js"])
+    @pytest.mark.parametrize("name", ["app.js", "results.js", "map.js"])
     def test_the_script_is_valid_module_source(self, name: str, tmp_path: Path) -> None:
         if shutil.which("node") is None:
             pytest.skip("the syntax of the front end is checked with Node, which is not installed")
-        path = {"app.js": APP_JS, "results.js": RESULTS_JS}[name]
+        path = {"app.js": APP_JS, "results.js": RESULTS_JS, "map.js": MAP_JS}[name]
         completed = subprocess.run(
             ["node", "--check", str(path)],
             capture_output=True,

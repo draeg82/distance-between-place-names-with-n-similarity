@@ -11,6 +11,12 @@
  * Nothing is sorted, filtered, measured or compared here, and the page is never reloaded to
  * start, restart or stop a search: hanging up the connection is how this API is told to stop,
  * so `AbortController` is the stop control and pressing Search again is a restart.
+ *
+ * The map is drawn from the same `results` events as the table, on requestAnimationFrame, and it
+ * is given the finds in the order they arrived: which pair is bold is the API's ranking, and which
+ * row is picked is the reader's. Drawing happens between reads rather than during one, so a busy
+ * scan cannot make the list slow, and a person who has asked for their pages not to move gets the
+ * arcs already drawn instead of drawing themselves in.
  */
 
 import {
@@ -19,6 +25,7 @@ import {
   datasetChoices,
   emptyWords,
   finishedWords,
+  focusWords,
   listWords,
   parseStream,
   progressWords,
@@ -26,10 +33,25 @@ import {
   rowCells,
   searchingWords,
 } from "./results.js";
+import { landPaths, loadOutline, paint, sceneOf } from "./map.js";
 
 const DATASETS_ENDPOINT = "/v1/datasets";
 const ESTIMATE_ENDPOINT = "/v1/estimate";
 const SEARCH_ENDPOINT = "/v1/search";
+
+/** How long the focused arc takes to draw itself in. Long enough to follow, short enough to ignore. */
+const ARC_SECONDS = 0.9;
+
+/**
+ * What the caption says when there is no pair to name, which is not one thing but three.
+ *
+ * A page that has not searched, a search that found nothing, and a list to pick from are different
+ * states, and the difference matters most in the middle one: a reader who has just watched a
+ * two-minute scan finish with nothing on the map should be told that, not shown a hint.
+ */
+const NOTHING_SEARCHED_YET = "No pair to draw yet: press search and the leading find appears as the bold arc.";
+const NOTHING_TO_DRAW = "No pair to draw: this search found nothing to put on the map.";
+const PICK_A_ROW = "The bold arc is the leading find. Press a row to move it.";
 
 // Filled in by `wireUpPage()`, which runs only where there is a page. Importing this module from
 // Node - which is how the marking of a name is checked - must not need a document.
@@ -45,10 +67,20 @@ let resultsTable = null;
 let resultRows = null;
 let startButton = null;
 let stopButton = null;
+let mapCanvas = null;
+let mapContext = null;
+let arcCaption = null;
 
 /** The search whose stream this page is still reading, if any, and the `started` event it answered with. */
 let running = null;
 let echo = null;
+
+/** What the map is showing: the running list, which row of it is bold, and how far that arc is drawn. */
+let finds = [];
+let focus = 0;
+let coast = [];
+let sharing = 1;
+let frame = null;
 
 /** A refusal the server already explained: the sentence is its own, so nothing is added to it. */
 class SearchRefusal extends Error {}
@@ -125,8 +157,117 @@ function messageFor(error) {
 }
 
 function clearRows() {
+  finds = [];
+  focus = 0;
   resultRows.replaceChildren();
   resultsTable.hidden = true;
+  showCaption();
+  drawMap();
+}
+
+/**
+ * Paint the map: the coastline, then the finds, then the focused pair's ends.
+ *
+ * The canvas is sized to the box the stylesheet gave it, at the two-to-one ratio a plate carree
+ * map needs, and only when it has actually changed - resizing the window should redraw, and a
+ * `results` event every few hundred milliseconds should not be seen by the compositor at all.
+ */
+function drawMap() {
+  if (mapContext === null) {
+    return;
+  }
+  const width = Math.max(1, mapCanvas.clientWidth || mapCanvas.width);
+  const height = Math.round(width / 2);
+  if (mapCanvas.width !== width || mapCanvas.height !== height) {
+    mapCanvas.width = width;
+    mapCanvas.height = height;
+  }
+  paint(mapContext, {
+    width,
+    height,
+    paths: coast,
+    scene: sceneOf({ rows: finds, focus, share: sharing }),
+  });
+}
+
+/** An arc that draws itself in is motion, and a person who has asked for none gets the finished arc. */
+function movingQuietly() {
+  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
+ * Redraw with the focused arc drawing itself in, one frame at a time.
+ *
+ * Frames rather than a timer, so the drawing keeps step with the screen and stops when the tab is
+ * hidden; and at most one animation runs, because a better list arriving mid-draw restarts it on
+ * the new lead rather than starting a second arc alongside it.
+ */
+function drawInFocus() {
+  if (mapContext === null) {
+    return;
+  }
+  if (frame !== null) {
+    cancelAnimationFrame(frame);
+    frame = null;
+  }
+  if (movingQuietly() || typeof requestAnimationFrame !== "function") {
+    sharing = 1;
+    drawMap();
+    return;
+  }
+  const started = performance.now();
+  const step = (now) => {
+    const elapsed = (now - started) / 1000;
+    sharing = elapsed >= ARC_SECONDS ? 1 : elapsed / ARC_SECONDS;
+    drawMap();
+    frame = sharing < 1 ? requestAnimationFrame(step) : null;
+  };
+  sharing = 0;
+  frame = requestAnimationFrame(step);
+}
+
+function showCaption() {
+  const words = focusWords(finds[focus] ?? null);
+  if (words !== "") {
+    arcCaption.textContent = words;
+    return;
+  }
+  if (finds.length > 0) {
+    arcCaption.textContent = PICK_A_ROW;
+    return;
+  }
+  // `echo` is the `started` event, so it says whether a search has been run at all on this page.
+  arcCaption.textContent = echo === null ? NOTHING_SEARCHED_YET : NOTHING_TO_DRAW;
+}
+
+/**
+ * Make one find the bold one.
+ *
+ * The row is picked by the reader; the map only moves the bold arc and prints that pair's
+ * coordinates. Nothing here changes the order of the list, which is the search's to decide.
+ */
+function focusOn(index) {
+  if (index < 0 || index >= finds.length) {
+    return;
+  }
+  focus = index;
+  markFocus();
+  showCaption();
+  drawInFocus();
+}
+
+function markFocus() {
+  for (const [index, row] of Array.from(resultRows.children).entries()) {
+    row.classList.toggle("selected", index === focus);
+  }
+}
+
+/** The row a click or a keypress belongs to, whichever element inside it it landed on. */
+function rowChosen(event) {
+  const row = event.target?.closest?.("tr");
+  if (row && resultRows.contains(row)) {
+    focusOn(Number(row.dataset.index));
+  }
 }
 
 /**
@@ -168,6 +309,7 @@ export function rowFor(row, doc = document) {
   const [first, second] = rowCells(row);
   const tr = doc.createElement("tr");
   tr.dataset.pair = `${first.geonameid}/${second.geonameid}`;
+  tr.tabIndex = 0;
   tr.append(
     nameCell(first, doc),
     textCell(first.country, doc),
@@ -187,11 +329,27 @@ export function rowFor(row, doc = document) {
  * Each `results` event carries the whole best-so-far list in the core's own order, so the page
  * has nothing to combine and no order to form a view about. `seen_pairs` says how many pairs the
  * list is a window onto, and `improvements` counts the ones the coalescing interval folded away.
+ *
+ * The map is redrawn from the same event as the table, and the new lead's arc draws itself in: a
+ * list that improves eleven times is eleven arcs, which is the scan's progress made visible.
  */
 function showList(event) {
-  resultRows.replaceChildren(...event.results.map((row) => rowFor(row)));
-  resultsTable.hidden = event.results.length === 0;
+  finds = event.results;
+  focus = 0;
+  // The index is where a find sits in the list, which is a fact about the table being filled now
+  // rather than about the row, so it is written as the rows go in.
+  resultRows.replaceChildren(
+    ...finds.map((row, index) => {
+      const tr = rowFor(row);
+      tr.dataset.index = String(index);
+      return tr;
+    }),
+  );
+  resultsTable.hidden = finds.length === 0;
   setStatus(listWords(event));
+  markFocus();
+  showCaption();
+  drawInFocus();
 }
 
 /** One line of the stream, routed by the kind of event it is. */
@@ -212,6 +370,11 @@ function handle(event) {
   }
   if (event.type === "done") {
     const foundNothing = event.pairs === 0 && echo !== null;
+    if (foundNothing) {
+      // Nothing matched, so nothing is drawn either: an arc left over from the search before this
+      // one would be a claim about a pair this search never found.
+      clearRows();
+    }
     setStatus(foundNothing ? "Search finished with nothing to show" : "Search finished");
     setMessage(foundNothing ? emptyWords(echo, event) : finishedWords(event));
     return;
@@ -276,10 +439,12 @@ async function start(event) {
   const controller = new AbortController();
   running = controller;
 
+  echo = null;
+  // After the echo is cleared, so the map's caption says "no search yet" rather than claiming this
+  // one has already found nothing.
   clearRows();
   setMessage("");
   progressLine.textContent = "";
-  echo = null;
   setWorking(true);
   const sent = parametersToSend();
   estimateLine.textContent = "Asking this server what that search would cost...";
@@ -313,6 +478,24 @@ function stop(event) {
   }
 }
 
+/**
+ * Load the coastline from this server.
+ *
+ * The outline is data, committed in the package, so there is no library to fetch and nothing from
+ * another machine at run time. If it does not arrive, the map is still a map: a graticule and the
+ * arcs, which are the finding. The arcs do not depend on the coastline, so a failure here is
+ * reported and otherwise left alone rather than stopping a search.
+ */
+async function fillCoastline() {
+  try {
+    const outline = await loadOutline();
+    coast = landPaths(outline.rings ?? []);
+    drawMap();
+  } catch (error) {
+    console.warn("no coastline to draw, so the map is a graticule:", error);
+  }
+}
+
 function wireUpPage() {
   form = document.getElementById("search-form");
   datasetMenu = document.getElementById("dataset");
@@ -326,12 +509,27 @@ function wireUpPage() {
   resultRows = document.getElementById("result-rows");
   startButton = document.getElementById("start-button");
   stopButton = document.getElementById("stop-button");
+  mapCanvas = document.getElementById("world-map");
+  arcCaption = document.getElementById("arc-caption");
+  mapContext = mapCanvas.getContext("2d");
 
   form.addEventListener("submit", (event) => {
     void start(event);
   });
   stopButton.addEventListener("click", stop);
 
+  // One pair of listeners for a table whose rows are replaced wholesale several times a second.
+  resultRows.addEventListener("click", rowChosen);
+  resultRows.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      rowChosen(event);
+    }
+  });
+  window.addEventListener("resize", () => drawMap());
+
+  showCaption();
+  void fillCoastline();
   void fillDatasetChoices();
 }
 

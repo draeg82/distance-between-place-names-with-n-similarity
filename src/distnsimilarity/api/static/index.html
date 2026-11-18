@@ -66,6 +66,13 @@
         <p id="message-line" class="message-line" role="status" aria-live="polite"></p>
       </section>
 
+      <figure class="world">
+        <canvas id="world-map" width="1000" height="500" role="img" aria-labelledby="arc-caption"></canvas>
+        <figcaption id="arc-caption" class="arc-caption">
+          No pair to draw yet: press search and the leading find appears as the bold arc.
+        </figcaption>
+      </figure>
+
       <table id="results-table" class="results-table" hidden>
         <caption>
           Best finds so far, in the order the search ranked them. The list changes while the scan
@@ -89,8 +96,9 @@
 
     <footer>
       <p>
-        Matching, ranking and distances come from this server: every row on this page arrived on
-        a search stream. Nothing here compares two names or measures a distance.
+        Matching, ranking and distances come from this server: every row on this page arrived on a
+        search stream. Nothing here compares two names or measures a distance &mdash; the map bends
+        arcs between the places it was given, and the kilometres beside them are the API's.
       </p>
     </footer>
   </body>

@@ -331,3 +331,27 @@ export function databaseWords(listing) {
   }
   return `${formatNumber(database.places)} places in ${database.path}, searched as one place database.`;
 }
+
+/**
+ * The focused pair, named, with both coordinates, to sit beside the map.
+ *
+ * The coordinates are the API's own, printed to three decimal places: about three hundred metres
+ * at the equator, which is finer than the coastline on the map next to it and far finer than a
+ * place name means, so it says "here, in the town" rather than pretending to a survey. Both places
+ * are given, because the finding is the pair and one end on its own is a fact about a town.
+ */
+function coordinatesOf(place) {
+  return `${Number(place.latitude).toFixed(3)}, ${Number(place.longitude).toFixed(3)}`;
+}
+
+function namedPlace(place) {
+  const country = place.country_code ? ` (${place.country_code})` : "";
+  return `${place.display_name ?? place.asciiname}${country} ${coordinatesOf(place)}`;
+}
+
+export function focusWords(row) {
+  if (!row) {
+    return "";
+  }
+  return `${namedPlace(row.first)} - ${namedPlace(row.second)}`;
+}

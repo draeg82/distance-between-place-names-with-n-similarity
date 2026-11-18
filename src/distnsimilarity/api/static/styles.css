@@ -171,3 +171,46 @@ footer {
   font-size: 0.85rem;
   margin-top: 2rem;
 }
+
+/*
+  The map.
+
+  The canvas is a 2:1 box because that is the ratio of the projection drawn into it: the painter is
+  given a width and a height and squares nothing, so a box of any other shape would stretch the
+  world. It is set to the box the page gives it, and the page keeps it to that ratio.
+
+  A row of the list is clickable and focusable, and the selected row is marked in the same colour
+  family as the differing characters, so "this row, that arc" can be read without hunting.
+*/
+
+.world {
+  margin: 1.5rem 0 0;
+}
+
+.world canvas {
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  display: block;
+  width: 100%;
+}
+
+.arc-caption {
+  color: var(--faint);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.results-table tbody tr {
+  cursor: pointer;
+}
+
+.results-table tbody tr.selected {
+  background: color-mix(in srgb, var(--marked) 26%, transparent);
+}
+
+.results-table tbody tr:focus-visible {
+  outline: 2px solid var(--marked);
+  outline-offset: -2px;
+}

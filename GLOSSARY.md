@@ -178,6 +178,32 @@ Reading a search's stream while it happens, from a terminal or a browser, and st
 hanging up.
 _Avoid_: tailing, following, live view
 
+### On the map
+
+**Leading find**:
+The pair at the head of the best-so-far list, which the map draws bold and the other finds sit
+faint behind. The list is already ranked when it arrives, so the lead is the API's decision, not
+the page's.
+_Avoid_: top result, winner, best match
+
+**Focused pair**:
+The find a reader has picked out of the list: the one whose arc is bold and whose two coordinates
+are printed under the map. Choosing it changes what is emphasised and nothing else - the order of
+the list is untouched.
+_Avoid_: selected item, active row, highlighted pair
+
+**World window**:
+The one map the page draws: longitudes folded into it, so an arc that leaves the right edge is
+picked up at the left at the same height. Two pieces of one arc, never a line streaking across a
+whole world.
+_Avoid_: viewport, pan, wrap-around hack
+
+**Coarse coastline**:
+The committed land outline the map is drawn on - outer rings, land inside a ring, one tenth of a
+degree of a map. Coarse on purpose: it says continent, not shore, so a coastal town may be drawn in
+the water (`docs/adr/0009-the-map-is-drawn-from-a-committed-coastline.md`).
+_Avoid_: basemap, tiles, map data
+
 ### The shape of the tool
 
 **The seam**:

@@ -205,13 +205,29 @@ is how this API is told to cancel, and the list on screen stays as what was foun
 search that matches nothing says so with the parameters it used, because "nothing over every
 place in the database" and "nothing over towns of 5,000" are different findings.
 
-The front end is four files served from the package - a page, two ES modules and a stylesheet -
-with no build step and nothing loaded from another machine
+The map underneath the form draws the same list. The leading find is the bold arc and every other
+find is faint behind it; the arcs come from the latitudes and longitudes the `results` events
+already carry, and they draw themselves in as the list improves, on frames rather than on a timer.
+Pressing a row - or tabbing to it and pressing Enter - makes that pair the bold one and prints both
+places' coordinates under the map. A search that matches nothing clears the map rather than leaving
+the previous search's pair on it, and a person who has asked their pages not to move gets the arcs
+already drawn.
+
+The front end is six files served from the package - a page, three ES modules, a stylesheet and a
+coastline - with no build step and nothing loaded from another machine
 (`docs/adr/0008-the-front-end-is-plain-es-modules.md`). `results.js` turns events into words and
-table cells; `app.js` asks for a search, reads the stream a line at a time and draws what comes
-back. Neither one matches, ranks, sorts or measures: the order on screen is the order the
-`results` events arrived in, and the highlighted characters are the positions the API said
-differ.
+table cells; `map.js` turns coordinates into a curve; `app.js` asks for a search, reads the stream
+a line at a time and draws what comes back. None of them matches, ranks, sorts or measures: the
+order on screen is the order the `results` events arrived in, the highlighted characters are the
+positions the API said differ, and the kilometres beside a pair are the API's - the map bends an
+arc between two places it was given and never works out how far apart they are.
+
+The map is a canvas and a JSON coastline, not a mapping library
+(`docs/adr/0009-the-map-is-drawn-from-a-committed-coastline.md`). The outline is Natural Earth 110m
+land, simplified to about 2,400 vertices and 32 KB, committed in the package and rebuilt by
+`scripts/make_world_outline.py` whenever somebody wants it finer. It is coarse enough that a
+coastal town can sit in the water, which is the right trade for a picture whose job is to show
+where an arc goes.
 
 ## Run the tests
 
@@ -220,7 +236,7 @@ uv run pytest
 ```
 
 That is the whole default suite: no network access, no writes outside a temporary
-directory, and none of the committed dumps loaded - 500-odd tests in under a second.
+directory, and none of the committed dumps loaded - 600-odd tests in under a second.
 Tests that do read real data are marked `slow` and excluded; run them with
 `uv run pytest -m slow`. The slow suite imports all three dumps into a temporary database,
 checks the 230,160 → 146,782 deduplication against the real files, and confirms the
@@ -228,8 +244,13 @@ query plans on a table big enough for the planner to mean it; it takes about fou
 
 The front end's presentation is checked by running its module with Node, which turns
 "the differing characters are highlighted" into an assertion about output rather than a
-look at a screenshot. Node is a developer's tool and not a dependency: where it is not
-installed those few tests skip and say so, and everything else still runs.
+look at a screenshot. The map is checked the same way: its arcs are sampled, and its painter is
+handed a canvas context that writes down what it was asked to do, so "a place at 90 east is drawn
+three quarters of the way across" and "an arc that crosses the antimeridian arrives at the far side
+at the same height" are assertions about numbers. The coastline is checked as data, by asking
+whether known cities and a known patch of ocean are on the right side of it. Node is a developer's
+tool and not a dependency: where it is not installed those few tests skip and say so, and
+everything else still runs.
 
 ## Using the core directly
 
