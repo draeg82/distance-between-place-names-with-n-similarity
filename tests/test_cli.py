@@ -44,8 +44,17 @@ def database(tmp_path: Path) -> Path:
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read CSV data rows, skipping comment lines (# ...) and the header."""
     with path.open(encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle))
+        lines = [
+            line for line in handle
+            if not line.startswith("#")
+        ]
+    if not lines:
+        return []
+    # First non-comment line is the header; the rest are data rows.
+    reader = csv.DictReader(lines)
+    return list(reader)
 
 
 class TestSearch:
@@ -147,7 +156,10 @@ class TestSearch:
     def test_the_header_is_the_legacy_contract(self, database: Path, tmp_path: Path) -> None:
         output = tmp_path / "out.csv"
         cli.main(["--database", str(database), "--n", "1", "--output", str(output)])
-        assert output.read_text(encoding="utf-8").splitlines()[0] == ",".join(HEADER)
+        # The header may be preceded by comment lines (metadata), so find it.
+        text = output.read_text(encoding="utf-8")
+        lines = [line for line in text.splitlines() if not line.startswith("#")]
+        assert lines[0] == ",".join(HEADER)
 
     def test_coordinates_are_reported_for_both_places(
         self, database: Path, tmp_path: Path
@@ -181,7 +193,10 @@ class TestSearch:
             ["--database", str(database), "--n", "9", "--output", str(output)]
         )
         assert exit_code == 0
-        assert output.read_text(encoding="utf-8").splitlines() == [",".join(HEADER)]
+        # With comment lines, the file has comments + header; no data rows.
+        text = output.read_text(encoding="utf-8")
+        non_comment = [line for line in text.splitlines() if not line.startswith("#")]
+        assert non_comment == [",".join(HEADER)]
 
     def test_the_character_difference_value_is_matched_exactly(
         self, database: Path, tmp_path: Path
@@ -285,8 +300,9 @@ class TestFileHandling:
         output = tmp_path / "out.csv"
         cli.main(["--database", str(database), "--n", "1", "--output", str(output)])
         raw = output.read_bytes()
-        assert raw.startswith(b"place1,lat1,lon1,place2,lat2,lon2,haversinedistance\r\n")
-        assert raw.count(b"\r\n") == 4
+        # Header and data lines use CRLF; comments precede the header.
+        assert b"place1,lat1,lon1,place2,lat2,lon2,haversinedistance\r\n" in raw
+        assert raw.count(b"\r\n") >= 4  # comments + header + data rows
         raw.decode("utf-8")
 
     def test_a_place_named_in_another_alphabet_comes_through_intact(self, tmp_path: Path) -> None:

@@ -317,8 +317,15 @@ class TestTheOptimisationIsReversibleOnItsOwn:
             assert exit_code == 0, capsys.readouterr().err
             outputs[flag and "full" or "prefiltered"] = output.read_bytes()
 
-        prefiltered_rows = outputs["prefiltered"].splitlines()[1:]
-        full_rows = outputs["full"].splitlines()[1:]
+        # Skip comment lines (\# ...) and the header before comparing data rows.
+        def data_rows(raw: bytes) -> list[bytes]:
+            return [
+                line for line in raw.splitlines()
+                if not line.startswith(b"#") and line != b"place1,lat1,lon1,place2,lat2,lon2,haversinedistance"
+            ]
+
+        prefiltered_rows = data_rows(outputs["prefiltered"])
+        full_rows = data_rows(outputs["full"])
         assert sorted(prefiltered_rows) == sorted(full_rows), (
             "the same query must find the same pairs whichever comparison path runs"
         )
@@ -330,9 +337,10 @@ class TestTheOptimisationIsReversibleOnItsOwn:
         assert lengths == sorted(lengths), (
             f"the prefiltered listing is meant to come out name length by name length: {lengths}"
         )
-        assert outputs["prefiltered"].splitlines()[0] == (
-            b"place1,lat1,lon1,place2,lat2,lon2,haversinedistance"
-        )
+        # The header is present after comment lines.
+        text = outputs["prefiltered"].decode("utf-8")
+        non_comment = [line for line in text.splitlines() if not line.startswith("#")]
+        assert non_comment[0] == "place1,lat1,lon1,place2,lat2,lon2,haversinedistance"
 
     def test_the_switch_is_documented_where_it_is_used(self) -> None:
         assert "--full-comparison" in cli.build_parser().format_help()
