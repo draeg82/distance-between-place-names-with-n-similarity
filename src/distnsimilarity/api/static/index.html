@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DistNSimilarity - places whose names differ by n characters</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Places whose names differ by <em>n</em> characters</h1>
+      <p id="database-line" class="database-line">Asking this server which places it searches&hellip;</p>
+    </header>
+
+    <main>
+      <form id="search-form" class="controls">
+        <fieldset class="mode-choice">
+          <legend>Which places are being compared</legend>
+          <label>
+            <input id="mode-everywhere" type="radio" checked />
+            <span>Everywhere: every pair of places, one number of differing characters</span>
+          </label>
+          <label>
+            <input id="mode-from-place" type="radio" />
+            <span>From a place: one place I choose, a range of differing characters outward</span>
+          </label>
+        </fieldset>
+
+        <fieldset id="everywhere-fields" data-mode="everywhere">
+          <legend>Everywhere: the whole candidate set, one threshold</legend>
+          <label>
+            <span>Differing characters</span>
+            <input id="n" name="n" type="number" min="0" step="1" value="1" required />
+          </label>
+        </fieldset>
+
+        <fieldset id="from-place-fields" data-mode="from-place">
+          <legend>From a place: looked up by name, then swept outward</legend>
+          <label>
+            <span>Name, spelled as the database spells it</span>
+            <input
+              id="place-name"
+              type="text"
+              placeholder="Springfield"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <button id="find-places" type="button">Find places</button>
+          <label>
+            <span>Which place you mean</span>
+            <select id="from_place" name="from_place" required disabled>
+              <option value="">nothing looked up yet</option>
+            </select>
+          </label>
+          <label>
+            <span>Up to how many differing characters</span>
+            <input
+              id="difference_limit"
+              name="difference_limit"
+              type="number"
+              min="0"
+              max="64"
+              step="1"
+              placeholder="3"
+            />
+          </label>
+          <label class="toggle">
+            <span>Identical names</span>
+            <input
+              id="exclude_identical_names"
+              name="exclude_identical_names"
+              type="checkbox"
+              value="true"
+            />
+          </label>
+          <p id="lookup-line" class="lookup-line" role="status" aria-live="polite"></p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Both searches: what to search over, and how to rank it</legend>
+          <label>
+            <span>Dataset</span>
+            <select id="dataset" name="dataset">
+              <option value="">loading the dataset choices&hellip;</option>
+            </select>
+          </label>
+          <label>
+            <span>Minimum population</span>
+            <input
+              id="min_population"
+              name="min_population"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="the dataset floor"
+            />
+          </label>
+          <label>
+            <span>Ranking</span>
+            <select id="direction" name="direction">
+              <option value="greatest">greatest distance first</option>
+              <option value="least">least distance first</option>
+            </select>
+          </label>
+          <label>
+            <span>Best finds kept</span>
+            <input id="top_k" name="top_k" type="number" min="1" max="2000" step="1" value="50" />
+          </label>
+        </fieldset>
+        <div class="actions">
+          <button id="start-button" type="submit">Search</button>
+          <button id="stop-button" type="button" hidden>Stop</button>
+        </div>
+      </form>
+
+      <section class="running">
+        <p id="estimate-line" class="estimate-line"></p>
+        <p id="status-line" class="status-line" role="status" aria-live="polite">
+          <span id="working-indicator" class="working" hidden aria-hidden="true"></span>
+          <span id="status-text"></span>
+        </p>
+        <p id="progress-line" class="progress-line"></p>
+        <p id="tally-line" class="tally-line"></p>
+        <p id="message-line" class="message-line" role="status" aria-live="polite"></p>
+      </section>
+
+      <figure class="world">
+        <canvas id="world-map" width="1000" height="500" role="img" aria-labelledby="arc-caption"></canvas>
+        <figcaption id="arc-caption" class="arc-caption">
+          No pair to draw yet: press search and the leading find appears as the bold arc.
+        </figcaption>
+      </figure>
+
+      <table id="results-table" class="results-table" hidden>
+        <caption>
+          Best finds so far, in the order the search ranked them. The list changes while the scan
+          runs.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">First place</th>
+            <th scope="col">Country</th>
+            <th scope="col">Population</th>
+            <th scope="col">Second place</th>
+            <th scope="col">Country</th>
+            <th scope="col">Population</th>
+            <th scope="col">Distance (km)</th>
+            <th scope="col">Differing characters</th>
+          </tr>
+        </thead>
+        <tbody id="result-rows"></tbody>
+      </table>
+    </main>
+
+    <footer>
+      <p>
+        Matching, ranking and distances come from this server: every row on this page arrived on a
+        search stream, and every place in the name chooser arrived from a lookup. Nothing here
+        compares two names, measures a distance, or decides which of two same-named places a reader
+        meant &mdash; the map bends arcs between the places it was given, and the kilometres beside
+        them are the API's.
+      </p>
+    </footer>
+  </body>
+</html>
