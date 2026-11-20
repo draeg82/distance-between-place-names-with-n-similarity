@@ -1,4 +1,13 @@
-"""The legacy CSV result shape, kept as an export format."""
+"""The legacy CSV result shape, kept as an export format.
+
+A result is a CSV whose header is the legacy column order (place1, lat1, lon1,
+place2, lat2, lon2, haversinedistance). A search's parameters are recorded as
+comment lines at the top of the file so a spreadsheet consumer can tell which
+export it is looking at.
+
+Diagnostics, progress and errors never land inside the file: the writer only
+receives data rows and never touches stderr or the console.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +39,9 @@ LEGACY_HEADER: tuple[str, ...] = (
 #: the same wherever it was produced.
 LEGACY_LINE_TERMINATOR = "\r\n"
 
+#: Comment prefix: the CSV parser must ignore these lines.
+COMMENT_PREFIX = "#"
+
 
 def legacy_row(first: Place, second: Place, distance_km: float) -> list[str]:
     """One result row: both names, both coordinates, the distance in kilometres."""
@@ -49,20 +61,36 @@ def open_legacy_writer(handle: TextIO) -> RowWriter:
     return csv.writer(handle, delimiter=",", lineterminator=LEGACY_LINE_TERMINATOR)
 
 
+def comment_line(text: str) -> str:
+    """A comment line the CSV parser will skip."""
+    return f"{COMMENT_PREFIX} {text}"
+
+
 class LegacyCsvWriter:
     """Writes results in the legacy column order, and nothing else.
 
-    Diagnostics never go through this: it takes rows, and only rows.
+    Diagnostics never go through this: it takes rows, and only rows. Search
+    parameters are written as comment lines before the header, so they never
+    interfere with the data.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         self._path = path
         self._handle: TextIO | None = None
         self._writer: RowWriter | None = None
+        self._metadata = metadata or {}
 
     def __enter__(self) -> "LegacyCsvWriter":
         self._handle = self._path.open("w", encoding="utf-8", newline="")
         self._writer = open_legacy_writer(self._handle)
+        # Write metadata as comment lines before the header.
+        for key, value in self._metadata.items():
+            self._writer.writerow([comment_line(f"{key}: {value}")])
         self._writer.writerow(LEGACY_HEADER)
         return self
 

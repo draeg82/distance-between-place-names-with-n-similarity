@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 from tqdm import tqdm
 
 from distnsimilarity.core.places import PlaceRowError
+from distnsimilarity.core.sweep import DEFAULT_DIFFERENCE_LIMIT, DifferenceRange
 from distnsimilarity.datasets import DatasetNotAvailableError
 from distnsimilarity.db.schema import DEFAULT_DATABASE_NAME, DatabaseSchemaError
 from distnsimilarity.export.csv_export import LegacyCsvWriter
@@ -27,12 +28,23 @@ from distnsimilarity.search import (
     SearchControl,
     SearchRequest,
     SearchSession,
+    build_metadata,
     open_search,
 )
 
 #: "Stopped, and the process was asked to stop": the 128 + SIGINT convention, so a script
 #: wrapping a cancelled search can tell it apart from a search that found nothing.
 EXIT_CANCELLED = 130
+
+
+def _make_difference_range(
+    limit: int | None, exclude_identical_names: bool
+) -> DifferenceRange:
+    """Build a difference range from CLI arguments, applying the default limit."""
+    return DifferenceRange(
+        limit=DEFAULT_DIFFERENCE_LIMIT if limit is None else limit,
+        exclude_identical_names=exclude_identical_names,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +103,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress the progress display.")
+    # From-a-place mode parameters.
+    parser.add_argument(
+        "--from-place",
+        type=int,
+        default=None,
+        help=(
+            "From-a-place mode: the GeoNames id to search outward from. "
+            "When given, --n is replaced by --difference-limit."
+        ),
+    )
+    parser.add_argument(
+        "--difference-limit",
+        type=int,
+        default=None,
+        help=(
+            "From-a-place mode: sweep from 0 differing characters up to this many. "
+            "Default: 3. Ignored unless --from-place is given."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-identical-names",
+        action="store_true",
+        default=False,
+        help=(
+            "From-a-place mode: leave identical-name pairs out of the results. "
+            "Ignored unless --from-place is given."
+        ),
+    )
     return parser
 
 
@@ -111,7 +151,8 @@ def _stop_on_signal(control: SearchControl) -> Callable[[int, FrameType | None],
 def write_pairs(session: SearchSession, output: Path, *, quiet: bool = False) -> int:
     """Write every pair the search reports, as it reports it, and say how many there were."""
     pairs = 0
-    with LegacyCsvWriter(output) as writer:
+    metadata = build_metadata(session)
+    with LegacyCsvWriter(output, metadata=metadata) as writer:
         for match in tqdm(
             session.pairs, disable=quiet, unit="pair", desc=f"matching n={session.request.n}"
         ):
@@ -124,11 +165,17 @@ def main(argv: Sequence[str] | None = None, *, control: SearchControl | None = N
     arguments = build_parser().parse_args(argv)
     try:
         request = SearchRequest(
-            n=arguments.n,
+            n=arguments.n if arguments.from_place is None else None,
             dataset=arguments.dataset,
             min_population=arguments.min_population,
             equal_length_prefilter=not arguments.full_comparison,
             database=arguments.database,
+            from_place=arguments.from_place,
+            difference=(
+                None
+                if arguments.from_place is None
+                else _make_difference_range(arguments.difference_limit, arguments.exclude_identical_names)
+            ),
         )
     except InvalidSearchRequest as error:
         print(f"error: {error}", file=sys.stderr)

@@ -423,3 +423,137 @@ export function focusWords(row) {
   }
   return `${namedPlace(row.first)} - ${namedPlace(row.second)}`;
 }
+
+/**
+ * One place out of a name lookup, written so two places of the same name are not the same sentence.
+ *
+ * `Springfield` belongs to eleven places in a cities1000 cache, in several countries, and the distance
+ * a sweep reports depends entirely on which one was meant - so the country, the population and the
+ * coordinates are not decoration, they are what makes the choice possible. The `geonameid` is kept
+ * as the option's value rather than written into its words: it is what goes back to the API, and a
+ * reader does not choose a town by a number.
+ */
+export function placeChoice(place) {
+  const country = place.country_code ? ` (${place.country_code})` : "";
+  return `${place.display_name ?? place.asciiname}${country} - population ${formatNumber(
+    place.population,
+  )} at ${coordinatesOf(place)}`;
+}
+
+/**
+ * What a lookup found, and what the reader still has to do with it.
+ *
+ * The count is the server's `match_count`, never a length this page worked out. The instruction is
+ * part of the sentence even when there is only one match: this app does not choose a place for a
+ * person (ADR 0011), and a page that quietly selected the single row would be answering a question
+ * the reader had not finished asking.
+ */
+export function foundPlacesWords(lookup) {
+  const found = lookup.match_count ?? 0;
+  return `${formatNumber(found)} ${plural(found, "place", "places")} ${plural(
+    found,
+    "is",
+    "are",
+  )} called ${lookup.name}: choose which one you mean, then search.`;
+}
+
+/**
+ * The name typed is not a name this database holds.
+ *
+ * This is a lookup that failed, and it has to read as one: the same page has another sentence for a
+ * search that ran and matched nothing, and collapsing the two would leave a person re-running a
+ * search that was never the problem. The typed name is quoted because it is the thing to go back and
+ * check the spelling of.
+ */
+export function noPlaceNamedWords(lookup) {
+  return `No place in this database is called \`${lookup.name}\`.`;
+}
+
+/**
+ * Why the page will not start a sweep that has no place to start it from.
+ *
+ * The server would refuse this, but the page knows it already, so the reader gets a sentence about
+ * the control that is missing rather than a status code - and the field they need to fill in is
+ * already on screen above it.
+ */
+export function noPlaceChosenWords() {
+  return "Choose which place you mean first: type a name and press Find places.";
+}
+
+/**
+ * The place a sweep is measured from, named as fully as the lookup named it.
+ *
+ * Every distance on the map and in the list is from this one town, which is not visible from a row
+ * of pairs; the echo is the API's own `origin` - the place behind the id that was sent, not the id.
+ */
+export function originWords(started) {
+  return `Every distance is measured from ${placeChoice(started.origin)}.`;
+}
+
+/**
+ * What each value of a swept range has found, in the order the server sent them.
+ *
+ * The list is drawn as it arrives: one entry per value of the range, including the values that found
+ * nothing, because "2: nothing" is a finding and a tally that skipped it would make a wide range look
+ * like a narrow one. Nothing here counts, sorts or drops anything - the counts come from the same
+ * walk as the rows beside them, and a second count in the page is a second answer to the same
+ * question. `excluded` is the server's word for the value the reader asked to leave out, so it is
+ * said rather than hidden.
+ */
+export function tallyWords(event) {
+  const counts = event.differences ?? [];
+  if (counts.length === 0) {
+    // Everywhere mode asks about one value, and the price line already names it; a sweep's range is
+    // the only thing with a shape worth drawing.
+    return "";
+  }
+  return counts
+    .map((entry) => {
+      const found = entry.pairs === 0 ? "nothing" : `${formatNumber(entry.pairs)} pairs`;
+      const leftOut = entry.excluded ? " (identical names left out)" : "";
+      return `at ${formatNumber(entry.character_difference)} differing characters: ${found}${leftOut}`;
+    })
+    .join(" - ");
+}
+
+/**
+ * A sweep that ran over its whole range and matched nothing in it.
+ *
+ * It says which place was searched from and which range was swept, because a from-a-place sweep that
+ * found nothing and a lookup that found no such place are two different dead ends - and the person
+ * who has to tell them apart is the one deciding whether to retype the name or widen the range.
+ */
+export function emptySweepWords(echo, done) {
+  const swept = [
+    `${placeChoice(echo.origin)} swept from 0 up to ${differenceWords(limitOf(echo))}`,
+    `over ${echo.dataset_label}`,
+  ];
+  if (echo.min_population !== null && echo.min_population !== undefined) {
+    swept.push(`a population floor of ${formatNumber(echo.min_population)}`);
+  }
+  const compared =
+    done && done.pairs_compared !== undefined
+      ? ` ${formatNumber(done.pairs_compared)} ${plural(
+          done.pairs_compared,
+          "pair",
+          "pairs",
+        )} compared${done.elapsed_seconds ? ` in ${formatDuration(done.elapsed_seconds)}` : ""}.`
+      : "";
+  return `No pair of places matched: ${swept.join(", ")}.${compared}`;
+}
+
+/**
+ * The top of the range this echo swept.
+ *
+ * `difference_limit` is what was asked for and may be absent; the number of entries in `differences`
+ * is what was actually swept, and the server always sends every value of the range, so the last one
+ * is the limit. Either way it is the server's number, not one this page worked out.
+ */
+function limitOf(echo) {
+  const swept = echo.differences ?? [];
+  const last = swept[swept.length - 1];
+  if (last !== undefined && last.character_difference !== undefined) {
+    return last.character_difference;
+  }
+  return echo.difference_limit;
+}

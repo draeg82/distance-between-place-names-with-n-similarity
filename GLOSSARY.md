@@ -19,10 +19,24 @@ The character difference being asked for. A pair matches when its character diff
 equals the threshold exactly — never at most, never at least.
 _Avoid_: n (in prose), tolerance, fuzziness
 
+**Character-difference range**:
+The character differences a from-a-place search asks about at once: zero, one, up to a limit
+(`difference_limit`). It is a limit, not a width — the range always starts at zero, and zero is
+a value like any other, not an off-by-one to step over. Everywhere mode still asks for one
+threshold and nothing else.
+_Avoid_: window, band, spread, tolerance, fuzziness
+
 **ASCII name**:
 A place's romanised spelling, and the only name ever compared. Accented letters are
 different characters from the plain letters they fold to, and case is a difference.
 _Avoid_: place name, title, label
+
+**Identical names**:
+Two ASCII names that are the same — a character difference of zero, and a finding rather than a
+miss. `exclude_identical_names` leaves those pairs out of what a search *reports* and changes
+nothing else: what is compared and what is counted stay as they were, so the count at zero keeps
+filling up and says it was excluded.
+_Avoid_: duplicate names, self-pair, exact match (for the switch), same-name mode
 
 **Display name**:
 A place's name in its own script and spelling, carried so results can be shown to a person
@@ -87,6 +101,20 @@ only thing a search reads: a search that cannot open it says so instead of searc
 something else.
 _Avoid_: cache, index, data file
 
+**Place lookup**:
+Asking which places a typed name is a question about, answered by equality with an ASCII name:
+no prefix, no case fold, two characters at least. It returns the whole list, biggest place
+first, and never chooses one for the reader — a search is run from a `geonameid`, never from a
+name.
+_Avoid_: autocomplete, suggest, typeahead, name search
+
+**Selected place**:
+The one place a from-a-place search is measured from: a `geonameid` taken out of a place lookup,
+not a name, because a name belongs to many places and the distance depends on which one. The
+stream calls it `origin`; an id no place in this database holds is a refusal, not a search with
+an empty list.
+_Avoid_: anchor, seed, origin (in prose), starting point, target
+
 **Source threshold**:
 On a place: the smallest population threshold whose dump contained it. It records which
 dumps were available to the import, not which dumps exist - importing a subset records the
@@ -120,6 +148,13 @@ One complete walk over a candidate set at one threshold. A scan is a stream: pai
 they are found rather than at the end.
 _Avoid_: query, run, job
 
+**Sweep**:
+One from-a-place search: the selected place walked against the candidates it could be compared
+with, over a whole character-difference range, keeping a count of what each value produced. The
+from-a-place equivalent of a scan, and a stream in the same way — pairs arrive as they are
+found, and a stopped sweep reports how far it got.
+_Avoid_: radius search, neighbourhood search, second scan, fan-out
+
 **Result**:
 The pairs a scan reported, in the order the candidates were walked: name-length group then
 increasing population for a search of the place database. A dump's file order survives only
@@ -136,6 +171,13 @@ A search that names no place to start from: everything in the chosen dataset is 
 everything else at one character difference, and the answer is the pairs that are furthest, or
 nearest, wherever they are. The question the tool exists for.
 _Avoid_: global search, all-pairs mode, exhaustive scan
+
+**From-a-place mode**:
+A search that starts from one selected place and asks which places its name could be confused
+with, at zero differing characters up to `difference_limit`. The answer is a list measured from
+that place, plus what each value of the range produced — the counts are half the answer, not a
+report about it.
+_Avoid_: local search, nearby search, seed mode, anchor mode
 
 ### Watching a search
 

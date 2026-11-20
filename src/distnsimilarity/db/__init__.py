@@ -9,11 +9,11 @@ from distnsimilarity.db.candidates import (
     candidate_places,
     effective_population_floor,
     name_length_groups,
-    places_with_ascii_name,
     scan_database,
     scope_for,
 )
 from distnsimilarity.db.importing import ImportReport, dumps_to_import, import_places
+from distnsimilarity.db.place_lookup import place_by_geonameid, places_matching_name
 from distnsimilarity.db.schema import (
     DEFAULT_DATABASE_NAME,
     INDEX_NAMES,
@@ -45,8 +45,9 @@ __all__ = [
     "ensure_schema",
     "import_places",
     "name_length_groups",
+    "place_by_geonameid",
     "place_count",
-    "places_with_ascii_name",
+    "places_matching_name",
     "scan_database",
     "scope_for",
 ]

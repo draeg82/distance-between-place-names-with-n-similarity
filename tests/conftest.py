@@ -25,6 +25,20 @@ COMMITTED_DATASETS = frozenset(
     (REPO_ROOT / name).resolve() for name in ("cities1000.txt", "cities5000.txt", "cities15000.txt")
 )
 
+#: Path to the committed cities1000 dump, available only to `@pytest.mark.slow` tests.
+CITIES_1000 = REPO_ROOT / "cities1000.txt"
+
+
+@pytest.fixture(scope="module")
+def real_database(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """`cities1000.txt` imported once, for slow end-to-end and timing tests."""
+    from support import import_dump
+
+    path = tmp_path_factory.mktemp("real-places") / "places.sqlite3"
+    connection = import_dump(path, CITIES_1000)
+    connection.close()
+    return path
+
 
 def _blocked_open_factory(real_open: Any) -> Any:
     def guarded_open(file: object, *arguments: Any, **keyword_arguments: Any) -> Any:

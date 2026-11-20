@@ -59,11 +59,40 @@ class RunningServer:
         with self.client() as client:
             return client.get(path, params=params or None)
 
-    def search(self, n: int = 1, **params: object) -> httpx.Response:
-        return self.get("/v1/search", n=n, **params)
+    def search(self, n: int | None = 1, **params: object) -> httpx.Response:
+        """Everywhere mode by default. `n=None` and a `from_place` in `params` is a sweep (#9)."""
+        query: dict[str, object] = {**params}
+        if n is not None:
+            query["n"] = n
+        return self.get("/v1/search", **query)
 
-    def estimate(self, n: int = 1, **params: object) -> httpx.Response:
-        return self.get("/v1/estimate", n=n, **params)
+    def search_from(self, geonameid: int, **params: object) -> httpx.Response:
+        """The other mode of the same endpoint: sweep outward from one place's id."""
+        return self.search(None, from_place=geonameid, **params)
+
+    def estimate(self, n: int | None = 1, **params: object) -> httpx.Response:
+        query: dict[str, object] = {**params}
+        if n is not None:
+            query["n"] = n
+        return self.get("/v1/estimate", **query)
+
+    def estimate_from(self, geonameid: int, **params: object) -> httpx.Response:
+        return self.estimate(None, from_place=geonameid, **params)
+
+    def places(self, name: str) -> httpx.Response:
+        """`/v1/places`: every place holding this exact ASCII name, biggest first."""
+        return self.get("/v1/places", name=name)
+
+    def export(self, **params: object) -> httpx.Response:
+        """`/v1/export`: run a search and download the legacy CSV.
+
+        Uses a longer read timeout because the export runs a full search.
+        """
+        with httpx.Client(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(CONNECT_TIMEOUT, read=120.0),
+        ) as client:
+            return client.get("/v1/export", params=params or None)
 
     def record(self, search_id: str) -> SearchRecord:
         record = self.registry.get(search_id)
@@ -152,3 +181,23 @@ def found_names(event: dict[str, Any]) -> list[tuple[str, str]]:
 
 def found_distances(event: dict[str, Any]) -> list[float]:
     return [float(row["distance_km"]) for row in event["results"]]
+
+
+def differences_of(event: dict[str, Any]) -> dict[int, int]:
+    """What each value of a swept range had found, as `{differing characters: pairs}`.
+
+    The wire carries this as a list in range order, because "2: nothing" is a finding and a dict
+    built by a test would drop it; this is the shape a test compares against.
+    """
+    return {
+        int(row["character_difference"]): int(row["pairs"]) for row in event["differences"]
+    }
+
+
+def excluded_of(event: dict[str, Any]) -> list[int]:
+    """Which values of the range are pairs the reader asked not to be shown."""
+    return [
+        int(row["character_difference"])
+        for row in event["differences"]
+        if row.get("excluded")
+    ]

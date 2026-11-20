@@ -12,6 +12,10 @@ A *dataset threshold* is the other way a search says what it covers, and it is a
 same way: `population >= threshold`, the GeoNames rule behind `cities5000.txt`. It is a
 floor chosen from a list rather than one typed in, which is what makes the two controls
 different in kind and not in effect - see `dataset_options` for the list, and ADR 0007.
+
+Reading one place out, or reading every place that holds a typed name, is not candidate
+generation and lives in `db.place_lookup`: a name is a question about spelling and a `geonameid`
+is an answer, and only the second one can be searched from.
 """
 
 from __future__ import annotations
@@ -241,19 +245,6 @@ def candidate_places(
         cursor = (int(rows[-1]["population"]), int(rows[-1]["geonameid"]))
 
 
-def places_with_ascii_name(connection: sqlite3.Connection, asciiname: str) -> list[Place]:
-    """Every place whose ASCII name is exactly this, GeoNames id order.
-
-    Searching from a place starts here: two places can share an ASCII name, so a name is a
-    question, not an answer, and the caller has to be shown the choices.
-    """
-    rows = connection.execute(
-        f"{PLACE_SELECT} WHERE asciiname = ? ORDER BY geonameid",
-        (asciiname,),
-    ).fetchall()
-    return [row_to_place(row) for row in rows]
-
-
 def scan_database(
     connection: sqlite3.Connection,
     character_difference: int,
@@ -391,6 +382,41 @@ def candidate_pairs_at_least(connection: sqlite3.Connection, floor: int | None) 
     """
     groups = name_length_groups(connection, floor)
     return sum(group.pairs for group in groups)
+
+
+def partners_at_name_length(
+    connection: sqlite3.Connection,
+    name_length: int,
+    population_floor: int | None = None,
+    *,
+    dataset_threshold: int | None = None,
+    excluding: int | None = None,
+) -> int:
+    """How many places a selected place has to be compared with: its partner set.
+
+    A search from one place compares it against the candidates holding its own name length - the
+    only names it can have a character difference with - which is one name-length group instead of
+    every pair in the candidate set. That is why the cost of a from-a-place search is said in
+    single comparisons rather than in millions of pairs, and why it can be answered off the
+    `(name_length, population)` index instead of by counting.
+
+    `excluding` is the selected place's own id: it is in its own name-length group, and a place is
+    not a partner of itself, so counting it would quote a cost that includes a comparison the
+    search will never make.
+    """
+    clauses = ["name_length = ?"]
+    parameters: list[object] = [name_length]
+    floor = candidate_floor(population_floor, dataset_threshold)
+    if floor is not None:
+        clauses.append("population >= ?")
+        parameters.append(floor)
+    if excluding is not None:
+        clauses.append("geonameid <> ?")
+        parameters.append(excluding)
+    row = connection.execute(
+        f"SELECT COUNT(*) FROM place WHERE {' AND '.join(clauses)}", parameters
+    ).fetchone()
+    return int(row[0])
 
 
 @dataclass(frozen=True)

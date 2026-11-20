@@ -34,11 +34,17 @@ uv run distnsimilarity-search --dataset 15000 --n 1 --output /tmp/out.csv
 | Flag | Meaning |
 | --- | --- |
 | `--dataset` | Optional dataset: a population threshold (`15000`) or the dump it is published as (`cities15000.txt`), both meaning "cities of 15,000 or more people". Omit it to search every place in the database. |
-| `--n` | Character-difference value: pairs match when their equal-length ASCII names differ in exactly this many positions. Required. |
+| `--n` | Character-difference value: pairs match when their equal-length ASCII names differ in exactly this many positions. Required for everywhere mode. |
 | `--output` | Where to write the CSV. Required. |
 | `--min-population` | Optional population floor; places below it are never compared. |
 | `--database` | Which place database to search. Default: `$DISTNSIMILARITY_DB`, else `places.sqlite3` beside the dumps. |
 | `--full-comparison` | Compare every place against every later place instead of only places whose ASCII name is the same length. Same pairs, same rows, far slower; only the order a plain listing arrives in differs. |
+| `--from-place` | From-a-place mode: the GeoNames id to search outward from. Implies sweep mode (ignores `--n`). |
+| `--difference-limit` | From-a-place mode: sweep from 0 differing characters up to this many. Default: 3. |
+| `--exclude-identical-names` | From-a-place mode: leave identical-name pairs out of the results. |
+
+`--output` is always supplied by the caller: the tool has no default output
+location. Either `--n` (everywhere mode) or `--from-place` (from-a-place mode) must be given.
 
 `--n` and `--output` are always supplied by the caller: the tool has no default output
 location. The database does have a default, because there is one thing to search: a search
@@ -66,6 +72,39 @@ uv run python scripts/benchmark_scan.py --dataset 1000 --n 1 --sample 2000 --dat
 With `--database` it also builds a temporary place database and times the database-backed
 walk against the in-memory one at the same population floor - same pairs, and the indexed
 lookup costs nothing measurable per comparison.
+
+## Export results to CSV
+
+A search writes the legacy column order (`place1,lat1,lon1,place2,lat2,lon2,haversinedistance`),
+distances in kilometres, with comment lines (`#`) recording the search mode, ranking direction
+and parameters in effect. The export works from both search modes.
+
+### From the terminal
+
+```bash
+# Everywhere mode
+uv run distnsimilarity-search --n 1 --dataset 5000 --output results.csv
+
+# From-a-place mode (sweep outward from one chosen place)
+uv run distnsimilarity-search --from-place 6280418 --difference-limit 3 --output results.csv
+```
+
+The CLI always exports from everywhere mode; add `--from-place`, `--difference-limit` and
+`--exclude-identical-names` for the sweep mode.
+
+### From the API
+
+```bash
+uv run distnsimilarity-serve --data-dir .
+
+# Everywhere mode
+curl -o export.csv "http://localhost:8000/v1/export?n=1&dataset=5000"
+
+# From-a-place mode
+curl -o export.csv "http://localhost:8000/v1/export?from_place=6280418&difference_limit=3"
+```
+
+A zero-result search produces a valid CSV with the header and comment lines but no data rows.
 
 ## Build the place database
 
@@ -166,8 +205,9 @@ server's database.
 
 Other endpoints: `/healthz` (alive, how many searches are live, and the state of the place
 database), `/v1/datasets` (what a search can be limited to, in words, and what each choice
-would cost), `/v1/estimate` (what a search would cost, without searching), and
-`/v1/searches` plus `/v1/searches/{id}` (what is running now, and the last few that ended).
+would cost), `/v1/places` (every place holding a name, to choose one to search from),
+`/v1/estimate` (what a search would cost, without searching), and `/v1/searches` plus
+`/v1/searches/{id}` (what is running now, and the last few that ended).
 
 Three things about the stream are deliberate:
 
@@ -186,6 +226,43 @@ Three things about the stream are deliberate:
 The watcher prints the cost first, then the best list again every time the server sends a
 better one; `--rows` trims it and `--no-progress` leaves the ticks out. It ranks, sorts and
 filters nothing: the order it prints is the order the `results` events arrived in.
+
+### Search outward from one place
+
+A name is not a place. `Springfield` belongs to more than a hundred places in the cities1000
+database, in several countries, and the distance depends on which one a search starts from - so
+a name is looked up before it is searched from:
+
+```bash
+curl -G --data-urlencode "name=Springfield" localhost:8000/v1/places
+```
+
+`GET /v1/places` answers with every place whose ASCII name equals the text exactly - no prefix,
+no case fold, two characters at least - as `{name, match_count, matches: [...]}`, each match
+carrying `geonameid`, `asciiname`, `display_name`, `latitude`, `longitude`, `population` and
+`country_code`, biggest population first. A name no place holds is an empty list, not an error;
+a name under two characters is a 422; no place database is a 409. The list is the answer: this
+app never picks the first row for you (ADR 0011).
+
+A from-a-place search is the same `GET /v1/search` stream, asked for with `from_place` (a
+`geonameid` out of that list) instead of `n`:
+
+```bash
+curl -N -G localhost:8000/v1/search \
+  --data-urlencode "from_place=6280418" --data-urlencode "difference_limit=3"
+```
+
+`difference_limit` says how far up the character-difference range to sweep - the range always
+starts at zero, which is what makes identical names reachable at all (ADR 0010) - and defaults to
+3. `exclude_identical_names=true` leaves the pairs at zero out of what is reported and changes
+nothing else: the same comparisons happen and the same counts fill up. `/v1/estimate` takes the
+same parameters and prices a sweep by the places it can be compared with.
+
+A sweep sends the same four events as a search from everywhere. Its `started` event also carries
+`origin` - the selected place, as the API reports a place, not the id that was sent - and every
+event carries `differences`: one `{character_difference, pairs, excluded}` entry per value of the
+range, including the values that found nothing. The counts and the rows come from the same walk,
+so they cannot disagree about how much of the range was swept.
 
 ### Or watch it in a browser
 

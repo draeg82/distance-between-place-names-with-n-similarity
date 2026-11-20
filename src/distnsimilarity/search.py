@@ -6,6 +6,13 @@ headless run reports is what the same request over HTTP reports, pair for pair, 
 order. `tests/test_search_seam.py` pins that; `tests/test_http_search.py` checks the HTTP
 adapter actually goes through here.
 
+A request says which of the two searches it wants: `n` for everywhere mode, which compares the
+whole candidate set at one character difference, or `from_place` for a sweep from one chosen
+place, which compares one name-length group over a range of them (`core.sweep`). Both arrive
+here, both are ranked here, and both come back as the same `SearchSession` - which is what keeps
+the streaming contract, the best-so-far list and the cancellation rules single rather than
+duplicated per mode.
+
 Cancellation is cooperative and shared. A search is handed a ``SearchControl``; the scan
 reads it on its own thread every `poll_every_comparisons` comparisons, and an adapter
 cancels it from wherever the client went away. Nothing is killed mid-comparison, and a
@@ -25,7 +32,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
+from distnsimilarity.core.place_lookup import PlaceNotFound
+from distnsimilarity.core.places import Place
 from distnsimilarity.core.scan import POLL_EVERY_COMPARISONS, MatchedPair
+from distnsimilarity.core.sweep import DifferenceCount, DifferenceRange, Sweep
 from distnsimilarity.core.topk import DEFAULT_TOP_K, RankedPair, Ranking, TopK, parse_direction
 from distnsimilarity.datasets import (
     DatasetNotAvailableError,
@@ -34,11 +44,14 @@ from distnsimilarity.datasets import (
     parse_dataset_threshold,
 )
 from distnsimilarity.db.candidates import (
+    candidate_places,
     dataset_options,
+    partners_at_name_length,
     places_at_least,
     scan_database,
     scope_for,
 )
+from distnsimilarity.db.place_lookup import place_by_geonameid
 from distnsimilarity.db.schema import connect, default_database_path, place_count
 
 #: Pairs pulled off a search per step when an adapter advances it in the background. A
@@ -46,10 +59,17 @@ from distnsimilarity.db.schema import connect, default_database_path, place_coun
 #: gone away from costing any more work.
 DEFAULT_BATCH_SIZE = 64
 
+#: The two searches, named the way the GLOSSARY names them and the way a client branches on them.
+#: A mode is not a parameter a caller sends - it is which of `n` and `from_place` was - so it is
+#: read off a request rather than parsed from one: there is no way to ask for a sweep and mean a
+#: threshold.
+EVERYWHERE_MODE = "everywhere"
+FROM_PLACE_MODE = "from_place"
+
 
 class InvalidSearchRequest(ValueError):
-    """A request that cannot describe a search: a dataset naming no threshold, a negative `n`,
-    or a bad floor."""
+    """A request that cannot describe a search: a dataset naming no threshold, a negative `n`, a
+    bad floor, or both a threshold and a place to start from."""
 
 
 class CacheNotImportedError(RuntimeError):
@@ -74,15 +94,27 @@ class SearchRequest:
     `top_k` and `direction` say what "the best so far" means for this search. They belong to
     the request rather than to an adapter because the ranking is the core's: a browser, a
     command-line watcher and a CSV all rank a pair the same way or they disagree in public.
+
+    A request then says which search it wants, and it can only want one:
+
+    * `n`: everywhere mode - every candidate against every other, at exactly this many differing
+      characters.
+    * `from_place`, with `difference`: a sweep from one chosen place over a *range* of character
+      differences. The id is a place rather than a name on purpose - a name belongs to more than
+      one place, and the distance depends on which one (`core.place_lookup`).
     """
 
-    n: int
+    n: int | None = None
     dataset: str | None = None
     min_population: int | None = None
     equal_length_prefilter: bool = True
     database: Path | None = None
     top_k: int = DEFAULT_TOP_K
     direction: Ranking = Ranking.GREATEST
+    #: The place a sweep starts from, by GeoNames id. None for everywhere mode.
+    from_place: int | None = None
+    #: The character-difference values a sweep reports. None until a `from_place` gives it one.
+    difference: DifferenceRange | None = None
     #: The population threshold the dataset resolved to, or None for the whole cache. Filled in
     #: by `__post_init__`, so a search reads a number instead of re-parsing a spelling.
     dataset_threshold: int | None = field(default=None, init=False, repr=False, compare=False)
@@ -97,14 +129,16 @@ class SearchRequest:
         except DatasetNotAvailableError as error:
             raise InvalidSearchRequest(str(error)) from error
         object.__setattr__(self, "dataset_threshold", threshold)
-        if isinstance(self.n, bool) or not isinstance(self.n, int):
-            raise InvalidSearchRequest(
-                f"the character difference must be a whole number, got {self.n!r}"
-            )
-        if self.n < 0:
-            raise InvalidSearchRequest(
-                f"the character difference cannot be negative: {self.n}"
-            )
+        self._check_mode()
+        if self.n is not None:
+            if isinstance(self.n, bool) or not isinstance(self.n, int):
+                raise InvalidSearchRequest(
+                    f"the character difference must be a whole number, got {self.n!r}"
+                )
+            if self.n < 0:
+                raise InvalidSearchRequest(
+                    f"the character difference cannot be negative: {self.n}"
+                )
         if self.min_population is not None:
             if isinstance(self.min_population, bool) or not isinstance(self.min_population, int):
                 raise InvalidSearchRequest(
@@ -125,6 +159,61 @@ class SearchRequest:
         if self.top_k < 1:
             raise InvalidSearchRequest(
                 f"a search has to keep at least one of its best pairs, got {self.top_k}"
+            )
+
+    @property
+    def mode(self) -> str:
+        """Which search this is, in the words an adapter shows or branches on.
+
+        Derived, never sent: `from_place` is the choice a caller made, and this is what that choice
+        means. An adapter that carried its own mode parameter could be told one thing and asked
+        another.
+        """
+        return EVERYWHERE_MODE if self.from_place is None else FROM_PLACE_MODE
+
+    def _check_mode(self) -> None:
+        """Exactly one of the two searches, and each with only the parameters it means.
+
+        A threshold and a range are two different questions about the same two names - "are these
+        names different in exactly two places" and "how near to identical are these names" - and a
+        request that gave both would have to be answered by guessing which one was meant.
+        """
+        if isinstance(self.from_place, bool) or (
+            self.from_place is not None
+            and (not isinstance(self.from_place, int) or self.from_place < 1)
+        ):
+            raise InvalidSearchRequest(
+                f"a search starts from a place, chosen by its GeoNames id, got {self.from_place!r}"
+            )
+        if self.from_place is None:
+            if self.n is None:
+                raise InvalidSearchRequest(
+                    "a search has to say what it is looking for: exactly one character "
+                    "difference (n) for everywhere mode, or a place to start from (from_place) "
+                    "for a sweep over a range of them"
+                )
+            if self.difference is not None:
+                raise InvalidSearchRequest(
+                    "a range of character differences belongs to a search from a place; "
+                    "everywhere mode asks for exactly one number of them"
+                )
+            return
+        if self.n is not None:
+            raise InvalidSearchRequest(
+                f"a search from a place sweeps a range of character differences, so it cannot "
+                f"also be given one threshold: n={self.n}"
+            )
+        if self.difference is not None and not isinstance(self.difference, DifferenceRange):
+            raise InvalidSearchRequest(
+                "a search from a place is given a character-difference range, got "
+                f"{self.difference!r}"
+            )
+        if self.difference is None:
+            object.__setattr__(self, "difference", DifferenceRange())
+        if not self.equal_length_prefilter:
+            raise InvalidSearchRequest(
+                "a search from a place compares it with the names of its own length, which is "
+                "what a character difference needs: there is no sweep without that rule to turn off"
             )
 
     @property
@@ -294,6 +383,9 @@ class SearchStats:
     cancel_reason: str = ""
     error: str = ""
     finished: bool = False
+    #: What each value of a swept range has produced. Empty for everywhere mode, which asks for
+    #: one character difference and so has no per-value tally to keep - see `core.sweep`.
+    differences: tuple[DifferenceCount, ...] = ()
     started_at: float = field(default_factory=time.monotonic)
 
     def elapsed_seconds(self) -> float:
@@ -354,6 +446,9 @@ class SearchStats:
             "cancel_reason": self.cancel_reason or None,
             "retryable": self.retryable,
             "error": self.error or None,
+            # A from-a-place search also says what each value of its range found, because the
+            # range is the answer as much as the list is: "4 pairs at 0, 11 at 1, none at 2".
+            "differences": [count.as_dict() for count in self.differences],
         }
 
 
@@ -375,6 +470,10 @@ class SearchSession:
     _connection: sqlite3.Connection | None = field(default=None, repr=False)
     _iterator: Iterator[MatchedPair] | None = field(default=None, repr=False)
     _ranker: TopK = field(default=None, repr=False)  # type: ignore[assignment]
+    #: The place a sweep started from, or None for everywhere mode. Held on the session rather
+    #: than only on the request because it is a place the database read, not a number a caller
+    #: typed, and an adapter shows it to the reader who is watching the finds arrive.
+    origin: Place | None = None
 
     def __post_init__(self) -> None:
         self._ranker = TopK(self.request.top_k, self.request.direction)
@@ -463,6 +562,30 @@ class SearchSession:
             self._connection = None
 
 
+def build_metadata(session: SearchSession) -> dict[str, str]:
+    """Metadata to record in the CSV header so two exports are distinguishable later.
+
+    Records the search mode, ranking direction, and all relevant parameter values
+    in effect when the search ran.
+    """
+    meta: dict[str, str] = {
+        "mode": session.request.mode,
+        "ranking": session.request.direction.value,
+    }
+    if session.request.mode == EVERYWHERE_MODE:
+        meta["n"] = str(session.request.n)
+    else:
+        meta["from_place"] = str(session.request.from_place)
+        if session.request.difference is not None:
+            meta["difference_limit"] = str(session.request.difference.limit)
+            meta["exclude_identical_names"] = str(session.request.difference.exclude_identical_names)
+    if session.request.dataset_threshold is not None:
+        meta["dataset"] = str(session.request.dataset_threshold)
+    if session.request.min_population is not None:
+        meta["min_population"] = str(session.request.min_population)
+    return meta
+
+
 def open_search(
     request: SearchRequest,
     *,
@@ -472,9 +595,10 @@ def open_search(
 
     The place database is the only thing a search reads, and opening it is the only way a
     search can fail before a pair exists: ``InvalidSearchRequest`` for a dataset that names no
-    threshold, ``DatasetNotAvailableError`` for one this database cannot honour, and
-    ``CacheNotImportedError`` for a database with no places in it. All three are answered before
-    the scan starts, which is what lets an adapter reply with a status code.
+    threshold, ``DatasetNotAvailableError`` for one this database cannot honour,
+    ``CacheNotImportedError`` for a database with no places in it, and ``PlaceNotFound`` for a
+    `from_place` that is not a place in it. All four are answered before the scan starts, which is
+    what lets an adapter reply with a status code.
     """
     search_control = SearchControl() if control is None else control
     database = request.database_path.expanduser()
@@ -482,8 +606,22 @@ def open_search(
     # say "no database here", not leave an empty one behind to confuse the next caller.
     present = database.is_file()
     connection = connect(database)
-    if place_count(connection) == 0:
+    try:
+        _refuse_a_database_there_is_nothing_to_search(connection, database, present)
+        _refuse_a_dataset_this_database_cannot_honour(connection, request, database)
+        if request.from_place is None:
+            return _open_everywhere_search(connection, request, search_control, database)
+        return _open_search_from_a_place(connection, request, search_control, database)
+    except BaseException:
+        # Nothing reached a session, so nothing else is holding this connection.
         connection.close()
+        raise
+
+
+def _refuse_a_database_there_is_nothing_to_search(
+    connection: sqlite3.Connection, database: Path, present: bool
+) -> None:
+    if place_count(connection) == 0:
         here = (
             f"there is no place database at {database}"
             if not present
@@ -493,17 +631,31 @@ def open_search(
             f"{here}, and the place database is the only search source: run "
             "distnsimilarity-import to fill it from a GeoNames dump"
         )
-    if request.dataset_threshold is not None:
-        # A dataset is a rule about the places that exist, so a rule this cache cannot honour is
-        # refused with the rules it can - the same list the dropdown is built from, so the answer
-        # and the choice a person was looking at cannot disagree.
-        if places_at_least(connection, int(request.dataset_threshold)) == 0:
-            choices = ", ".join(option.label for option in dataset_options(connection))
-            connection.close()
-            raise DatasetNotAvailableError(
-                f"no place in {database} has {int(request.dataset_threshold):,} or more people; "
-                f"this database can be searched as: {choices}"
-            )
+
+
+def _refuse_a_dataset_this_database_cannot_honour(
+    connection: sqlite3.Connection, request: SearchRequest, database: Path
+) -> None:
+    if request.dataset_threshold is None:
+        return
+    # A dataset is a rule about the places that exist, so a rule this cache cannot honour is
+    # refused with the rules it can - the same list the dropdown is built from, so the answer
+    # and the choice a person was looking at cannot disagree.
+    if places_at_least(connection, int(request.dataset_threshold)) == 0:
+        choices = ", ".join(option.label for option in dataset_options(connection))
+        raise DatasetNotAvailableError(
+            f"no place in {database} has {int(request.dataset_threshold):,} or more people; "
+            f"this database can be searched as: {choices}"
+        )
+
+
+def _open_everywhere_search(
+    connection: sqlite3.Connection,
+    request: SearchRequest,
+    control: SearchControl,
+    database: Path,
+) -> SearchSession:
+    """Every candidate against every other, at exactly one character difference."""
     scope = scope_for(
         connection,
         request.min_population,
@@ -521,26 +673,102 @@ def open_search(
     )
     pairs = scan_database(
         connection,
-        request.n,
+        int(request.n),
         request.min_population,
         dataset_threshold=request.dataset_threshold,
         equal_length_prefilter=request.equal_length_prefilter,
-        cancel=search_control.stopped,
-        progress=_count_comparisons(stats, search_control),
-        poll_every_comparisons=search_control.poll_every_comparisons,
+        cancel=control.stopped,
+        progress=_count_comparisons(stats, control),
+        poll_every_comparisons=control.poll_every_comparisons,
     )
     return SearchSession(
         request=request,
         database_path=database.resolve(),
-        control=search_control,
+        control=control,
         stats=stats,
         _pairs=pairs,
         _connection=connection,
     )
 
 
+def _open_search_from_a_place(
+    connection: sqlite3.Connection,
+    request: SearchRequest,
+    control: SearchControl,
+    database: Path,
+) -> SearchSession:
+    """One chosen place, walked against the places it could be compared with.
+
+    The candidate set is still the dataset's - the same floor, the same dataset rule - but the
+    work is one name-length group instead of every pair inside it, so the cost this search reports
+    is the size of its partner set rather than a pair count in the millions.
+    """
+    origin = place_by_geonameid(connection, request.from_place)
+    if origin is None:
+        raise PlaceNotFound(
+            f"no place with GeoNames id {request.from_place} in the place database at "
+            f"{database}; look the name up and search from one of the places it offers"
+        )
+    difference = DifferenceRange() if request.difference is None else request.difference
+    scope = scope_for(
+        connection,
+        request.min_population,
+        dataset_threshold=request.dataset_threshold,
+    )
+    partners = partners_at_name_length(
+        connection,
+        origin.name_length,
+        request.min_population,
+        dataset_threshold=request.dataset_threshold,
+        excluding=origin.geonameid,
+    )
+    sweep = Sweep(origin, difference)
+
+    def tally() -> tuple[DifferenceCount, ...]:
+        """What each value of the range has produced, read at the moment a poll window closes."""
+        return sweep.counts
+
+    stats = SearchStats(
+        places=scope.places,
+        population_floor=scope.population_floor,
+        dataset_threshold=request.dataset_threshold,
+        dataset_label=request.dataset_name,
+        database_path=str(database.resolve()),
+        # One comparison per partner, which is what a sweep is: the denominator a watcher's
+        # progress bar walks towards, counted before the first partner is read.
+        candidate_pairs=partners,
+        differences=sweep.counts,
+    )
+    pairs = sweep.pairs(
+        candidate_places(
+            connection,
+            request.min_population,
+            dataset_threshold=request.dataset_threshold,
+            name_length=origin.name_length,
+            # The place is in its own name-length group and is not a partner of itself: left
+            # out here so it is never read, and again inside the sweep.
+            exclude_geonameid=origin.geonameid,
+        ),
+        cancel=control.stopped,
+        progress=_count_comparisons(stats, control, tally=tally),
+        poll_every_comparisons=control.poll_every_comparisons,
+    )
+    return SearchSession(
+        request=request,
+        database_path=database.resolve(),
+        control=control,
+        stats=stats,
+        _pairs=pairs,
+        _connection=connection,
+        origin=origin,
+    )
+
+
 def _count_comparisons(
-    stats: SearchStats, control: SearchControl
+    stats: SearchStats,
+    control: SearchControl,
+    *,
+    tally: Callable[[], tuple[DifferenceCount, ...]] | None = None,
 ) -> Callable[[int], None]:
     """The scan's progress callback: add to the count, then let the driver hold the scan.
 
@@ -548,10 +776,16 @@ def _count_comparisons(
     scanned and a rate without the inner loop paying per comparison. Whether it blocks is the
     driver's business, not the scan's: with no `pacing` set it counts and returns, and with one
     it is where a caller that cannot take a whole scan at once catches up.
+
+    `tally` is the other thing a poll window is for: a sweep's per-value counts are refreshed at
+    the same moment the comparison count is, so the numbers an interface shows next to the finds
+    are as fresh as the finds and not fresher than the last poll.
     """
 
     def report(comparisons: int) -> None:
         stats.pairs_compared += comparisons
+        if tally is not None:
+            stats.differences = tally()
         control.hold()
 
     return report

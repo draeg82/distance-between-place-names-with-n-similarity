@@ -36,8 +36,11 @@ from distnsimilarity.api.frontend import mount_frontend
 from distnsimilarity.api.payload import (
     DEFAULT_RESULTS_INTERVAL,
     NDJSON_MEDIA_TYPE,
+    asking_words,
     done_line,
     error_line,
+    origin_payload,
+    place_payload,
     progress_line,
     results_line,
     started_line,
@@ -49,9 +52,18 @@ from distnsimilarity.api.runner import (
     SearchPool,
     SearchRunner,
 )
+from distnsimilarity.export.csv_export import LegacyCsvWriter
+from distnsimilarity.search import build_metadata
+from distnsimilarity.core.place_lookup import (
+    InvalidLookupText,
+    PlaceNotFound,
+    lookup_text,
+)
+from distnsimilarity.core.sweep import DEFAULT_DIFFERENCE_LIMIT, DifferenceRange
 from distnsimilarity.core.topk import DEFAULT_TOP_K, parse_direction
 from distnsimilarity.datasets import DatasetNotAvailableError
 from distnsimilarity.db.candidates import dataset_options
+from distnsimilarity.db.place_lookup import places_matching_name
 from distnsimilarity.db.schema import (
     DEFAULT_DATABASE_NAME,
     DatabaseNotImportedError,
@@ -79,6 +91,8 @@ DEFAULT_PROGRESS_INTERVAL = 0.5
 #: as a half-open stream.
 REQUEST_ERRORS: tuple[tuple[tuple[type[BaseException], ...], int, str], ...] = (
     ((InvalidSearchRequest,), 422, "InvalidSearchRequest"),
+    ((InvalidLookupText,), 422, "InvalidPlaceLookup"),
+    ((PlaceNotFound,), 404, "PlaceNotFound"),
     ((DatasetNotAvailableError,), 404, "DatasetNotAvailable"),
     ((CacheNotImportedError,), 409, "CacheNotImported"),
     ((DatabaseNotImportedError,), 409, "PlaceDatabaseNotImported"),
@@ -138,8 +152,10 @@ def error_response(error: BaseException) -> JSONResponse | None:
 def refused_because_running(running: SearchRecord) -> JSONResponse:
     """The answer to a second search: no, this one, and why.
 
-    Refusing has to be actionable, so the message names the search in the way, how far it has
-    got, and the one thing that will free the server.
+    Refusing has to be actionable, so the message names the search in the way, what it is asking
+    for, how far it has got, and the one thing that will free the server. `asking_words` is what
+    makes that work for either mode: a refusal that quoted `n=None` for a sweep would be quoting a
+    parameter the running search never had.
     """
     summary = running.as_dict()
     share = running.stats.share_compared()
@@ -149,8 +165,8 @@ def refused_because_running(running: SearchRecord) -> JSONResponse:
             "error": SEARCH_ALREADY_RUNNING,
             "message": (
                 f"one search runs at a time on this server, and {running.search_id} "
-                f"({running.request.get('dataset_label')} at n={running.request.get('n')}) "
-                f"{where}, "
+                f"({running.request.get('dataset_label')}, "
+                f"{asking_words(running.request)}) {where}, "
                 f"{running.seconds}s in. Close the connection that started it to stop it, or "
                 f"ask for /v1/searches/{running.search_id} to watch it."
             ),
@@ -253,16 +269,20 @@ def create_app(
     def build_request(
         *,
         dataset: str | None,
-        n: int,
+        n: int | None,
         min_population: int | None,
         full_comparison: bool,
         top_k: int,
         direction: str,
+        from_place: int | None = None,
+        difference_limit: int | None = None,
+        exclude_identical_names: bool = False,
     ) -> tuple[SearchRequest, dict[str, Any]]:
         """The seam's request plus the echo an event carries, or the refusal of both.
 
         One place builds a request for every endpoint, so `/v1/estimate` cannot accept a
-        parameter that `/v1/search` would then refuse.
+        parameter that `/v1/search` would then refuse - including the two mode parameters, which
+        the seam refuses or accepts in the same way for both.
         """
         # The direction is read here rather than left to `SearchRequest`, which takes a
         # `Ranking`: a spelling the core does not implement is a parameter the client has to
@@ -270,6 +290,33 @@ def create_app(
         try:
             ranking = parse_direction(direction)
         except ValueError as error:
+            raise InvalidSearchRequest(str(error)) from error
+        # A range is only built when there is something to build it for: a limit nobody gave stays
+        # nobody gave it rather than turning into a default the caller never asked for. A range
+        # parameter that arrives without a place to sweep from is handed to the seam anyway, which
+        # refuses it - a query string asking for two different searches is not a query string with
+        # one parameter to quietly drop.
+        asks_for_a_range = (
+            from_place is not None
+            or difference_limit is not None
+            or exclude_identical_names
+        )
+        try:
+            difference = (
+                None
+                if not asks_for_a_range
+                else DifferenceRange(
+                    limit=(
+                        DEFAULT_DIFFERENCE_LIMIT
+                        if difference_limit is None
+                        else difference_limit
+                    ),
+                    exclude_identical_names=exclude_identical_names,
+                )
+            )
+        except ValueError as error:
+            # "-1 differing characters" is a bad parameter, not a broken server: the range says so
+            # in words the same 422 carries for every other bad parameter here.
             raise InvalidSearchRequest(str(error)) from error
         search_request = SearchRequest(
             n=n,
@@ -279,6 +326,8 @@ def create_app(
             database=cache_path(),
             top_k=top_k,
             direction=ranking,
+            from_place=from_place,
+            difference=difference,
         )
         echo = {
             "requested_dataset": dataset,
@@ -286,12 +335,28 @@ def create_app(
             # client filters on one and shows the other, and neither is a file name.
             "dataset": search_request.dataset_threshold,
             "dataset_label": search_request.dataset_name,
-            "n": n,
+            "n": search_request.n,
             "min_population": min_population,
             "equal_length_prefilter": search_request.equal_length_prefilter,
             "database": str(search_request.database_path),
             "top_k": search_request.top_k,
             "direction": search_request.direction.value,
+            # Which of the two searches this is, and the parameters that belong to it. A client
+            # branches on `mode` rather than on `from_place is not null`, so adding a third search
+            # later is a new word in one field rather than a new null to test for everywhere.
+            "mode": search_request.mode,
+            "from_place": search_request.from_place,
+            "difference_limit": (
+                None if search_request.difference is None else search_request.difference.limit
+            ),
+            "exclude_identical_names": (
+                None
+                if search_request.difference is None
+                else search_request.difference.exclude_identical_names
+            ),
+            # Filled in when the place database has answered for the id: `from_place` is what the
+            # caller sent, `origin` is the place it turned out to mean.
+            "origin": None,
         }
         return search_request, echo
 
@@ -328,6 +393,84 @@ def create_app(
             "datasets": [option.as_dict() for option in options],
         }
 
+    @app.get("/v1/places")
+    async def places(
+        request: Request,
+        name: str | None = Query(
+            None,
+            description="an ASCII name, spelled exactly: no prefix, no case fold, two characters "
+            "at least",
+        ),
+    ) -> Response:
+        """Every place a typed name is a question about, biggest first: the choices to pick from.
+
+        A name is not a place. `Springfield` belongs to more than a hundred places in the
+        cities1000 cache, in several countries, and the distance depends on which one a search
+        starts from - so the answer is the whole list, with the country, population and
+        coordinates a person needs to tell them apart, and the `geonameid` the search is then run
+        from. Nothing here chooses for them: the first row is the biggest, not the intended.
+
+        "There is no place database" is refused with a status code rather than answered with an
+        empty list, because an empty list is the page's other answer - "no place is called that" -
+        and the two are different things to tell a person.
+        """
+        refused = refusal_for_removed_parameter(request.query_params)
+        if refused is not None:
+            return refused
+        if name is None:
+            return JSONResponse(
+                {
+                    "error": "InvalidPlaceLookup",
+                    "message": (
+                        "a place lookup asks for a name: /v1/places?name=Springfield. Two "
+                        "characters at least, spelled exactly."
+                    ),
+                },
+                status_code=422,
+            )
+        path = cache_path()
+        connection = read_only_connection(path)
+        if connection is None:
+            return JSONResponse(
+                {
+                    "error": "PlaceDatabaseNotImported",
+                    "message": (
+                        f"there is no place database to look a name up in at {path}: run "
+                        "distnsimilarity-import to fill one from a GeoNames dump"
+                    ),
+                    "database": cache_status(path),
+                },
+                status_code=409,
+            )
+        try:
+            typed = lookup_text(name)
+            found = places_matching_name(connection, typed)
+        except ValueError as error:
+            connection.close()
+            refusal = error_response(error)
+            if refusal is None:
+                raise
+            return refusal
+        except sqlite3.Error as error:
+            connection.close()
+            return JSONResponse(
+                {
+                    "error": "PlaceDatabaseUnusable",
+                    "message": f"the place database at {path} could not be read: {error}",
+                    "database": cache_status(path),
+                },
+                status_code=409,
+            )
+        connection.close()
+        return JSONResponse(
+            {
+                "database": cache_status(path),
+                "name": typed,
+                "match_count": len(found),
+                "matches": [place_payload(place) for place in found],
+            }
+        )
+
     @app.get("/v1/searches")
     async def list_searches() -> dict[str, Any]:
         """The search this process is running, and the last few that ended."""
@@ -346,15 +489,24 @@ def create_app(
             )
         return JSONResponse(record.as_dict())
 
-    async def open_on_worker(search_request: SearchRequest) -> SearchSession:
+    async def open_on_worker(
+        search_request: SearchRequest, echo: dict[str, Any]
+    ) -> SearchSession:
         """Open a search off the event loop: counting a big candidate set is the slow part.
 
         A dataset that names no threshold, and a database nobody has imported, are answered
         with a status code, so this is where a bad parameter stops being a request and becomes
-        an answer - before a pair exists and before anything needs cancelling.
+        an answer - before a pair exists and before anything needs cancelling. So is a
+        `from_place` that is not a place in this database: 404, no stream, nothing to cancel.
+
+        Opening is also where a chosen id becomes a place, so the echo carries it: a client that
+        watches a sweep, and a server refusing a second one, both say which place the search
+        starts from without asking the database twice.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(pool.executor, partial(open_search, search_request))
+        session = await loop.run_in_executor(pool.executor, partial(open_search, search_request))
+        echo["origin"] = origin_payload(session.origin)
+        return session
 
     @app.get("/v1/estimate")
     async def estimate(
@@ -362,17 +514,38 @@ def create_app(
         dataset: str | None = Query(
             None, description="population threshold (5000) or dump name; omit for every place"
         ),
-        n: int = Query(..., description="exactly this many differing character positions"),
+        n: int | None = Query(
+            None,
+            description="everywhere mode: exactly this many differing character positions",
+        ),
         min_population: int | None = Query(None, description="never compare places below this"),
         full_comparison: bool = Query(False, description="ignore the equal-length prefilter"),
         top_k: int = Query(DEFAULT_TOP_K, description="how many of the best finds to keep"),
         direction: str = Query("greatest", description="greatest or least distance first"),
+        from_place: int | None = Query(
+            None,
+            description="from-a-place mode: the GeoNames id to search outward from "
+            "(/v1/places?name=... hands out the ids)",
+        ),
+        difference_limit: int | None = Query(
+            None,
+            description="from-a-place mode: sweep from 0 differing characters up to this many "
+            f"(default {DEFAULT_DIFFERENCE_LIMIT})",
+        ),
+        exclude_identical_names: bool = Query(
+            False,
+            description="from-a-place mode: leave the same-name pairs out of the finds",
+        ),
     ) -> Response:
         """What a search would cost, without searching.
 
-        `candidate_pairs` is exact and is what the scan will compare; `estimate.seconds` is
+        `candidate_pairs` is exact and is what the search will compare; `estimate.seconds` is
         only quoted once something has actually been measured on this machine, and says which
         of the two it is. This is the number a person decides with, so it is not a guess.
+
+        In from-a-place mode `candidate_pairs` is a place's partner set - the candidates holding
+        its own name length, itself left out - rather than every pair in the candidate set, which
+        is why the same field reads as tens of thousands here and millions in everywhere mode.
         """
         refused = refusal_for_removed_parameter(request.query_params)
         if refused is not None:
@@ -385,8 +558,11 @@ def create_app(
                 full_comparison=full_comparison,
                 top_k=top_k,
                 direction=direction,
+                from_place=from_place,
+                difference_limit=difference_limit,
+                exclude_identical_names=exclude_identical_names,
             )
-            session = await open_on_worker(search_request)
+            session = await open_on_worker(search_request, echo)
         except BaseException as error:
             refusal = error_response(error)
             if refusal is None:
@@ -400,6 +576,9 @@ def create_app(
                     "places": session.stats.places,
                     "population_floor": session.stats.population_floor,
                     "candidate_pairs": session.stats.candidate_pairs,
+                    # The values a sweep will report, before it has compared anything: which
+                    # numbers a reader is about to see fill up.
+                    "differences": session.stats.as_dict()["differences"],
                     "estimate": cost.as_dict(),
                 }
             )
@@ -413,18 +592,38 @@ def create_app(
         dataset: str | None = Query(
             None, description="population threshold (5000) or dump name; omit for every place"
         ),
-        n: int = Query(..., description="exactly this many differing character positions"),
+        n: int | None = Query(
+            None,
+            description="everywhere mode: exactly this many differing character positions",
+        ),
         min_population: int | None = Query(None, description="never compare places below this"),
         full_comparison: bool = Query(False, description="ignore the equal-length prefilter"),
         top_k: int = Query(DEFAULT_TOP_K, description="how many of the best finds to keep"),
         direction: str = Query("greatest", description="greatest or least distance first"),
+        from_place: int | None = Query(
+            None,
+            description="from-a-place mode: the GeoNames id to search outward from "
+            "(/v1/places?name=... hands out the ids)",
+        ),
+        difference_limit: int | None = Query(
+            None,
+            description="from-a-place mode: sweep from 0 differing characters up to this many "
+            f"(default {DEFAULT_DIFFERENCE_LIMIT})",
+        ),
+        exclude_identical_names: bool = Query(
+            False,
+            description="from-a-place mode: leave the same-name pairs out of the finds",
+        ),
     ) -> Response:
-        """Stream a search: `started`, then `progress` and `results` as the scan runs, then
-        `done`.
+        """Stream a search: `started`, then `progress` and `results` as it runs, then `done`.
 
-        The scan's own order decides which pairs have been seen; the core's ranking decides
+        The search's own order decides which pairs have been seen; the core's ranking decides
         which of them are the best. Nothing is held back to be batched beyond the coalescing
         interval on each kind of event.
+
+        Both modes share the stream: a sweep from one place sends the same four events, with the
+        place it starts from in `started` and what each value of its range has found in every
+        event after that.
         """
         refused = refusal_for_removed_parameter(request.query_params)
         if refused is not None:
@@ -432,8 +631,8 @@ def create_app(
         try:
             # Both halves of the refusal are decided before a pair exists - building the
             # request rejects a bad `n`, floor, dataset, list size or direction; opening the
-            # database reads nothing but counts - so the answer is a status code, with no
-            # stream and nothing to cancel.
+            # database reads nothing but counts, and looks the chosen place up by its key - so
+            # the answer is a status code, with no stream and nothing to cancel.
             search_request, echo = build_request(
                 dataset=dataset,
                 n=n,
@@ -441,8 +640,11 @@ def create_app(
                 full_comparison=full_comparison,
                 top_k=top_k,
                 direction=direction,
+                from_place=from_place,
+                difference_limit=difference_limit,
+                exclude_identical_names=exclude_identical_names,
             )
-            session = await open_on_worker(search_request)
+            session = await open_on_worker(search_request, echo)
         except BaseException as error:
             refusal = error_response(error)
             if refusal is None:
@@ -470,6 +672,116 @@ def create_app(
                 "Cache-Control": "no-store",
                 "X-Search-Id": record.search_id,
                 "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/v1/export")
+    async def export(
+        request: Request,
+        dataset: str | None = Query(
+            None, description="population threshold (5000) or dump name; omit for every place"
+        ),
+        n: int | None = Query(
+            None,
+            description="everywhere mode: exactly this many differing character positions",
+        ),
+        min_population: int | None = Query(None, description="never compare places below this"),
+        full_comparison: bool = Query(False, description="ignore the equal-length prefilter"),
+        top_k: int = Query(DEFAULT_TOP_K, description="how many of the best finds to keep"),
+        direction: str = Query("greatest", description="greatest or least distance first"),
+        from_place: int | None = Query(
+            None,
+            description="from-a-place mode: the GeoNames id to search outward from "
+            "(/v1/places?name=... hands out the ids)",
+        ),
+        difference_limit: int | None = Query(
+            None,
+            description="from-a-place mode: sweep from 0 differing characters up to this many "
+            f"(default {DEFAULT_DIFFERENCE_LIMIT})",
+        ),
+        exclude_identical_names: bool = Query(
+            False,
+            description="from-a-place mode: leave the same-name pairs out of the finds",
+        ),
+    ) -> Response:
+        """Export results as legacy CSV: place1, lat1, lon1, place2, lat2, lon2, haversinedistance.
+
+        Runs the full search, writes every pair (even zero-result searches get a valid
+        file with just the header), and records the ranking direction and parameter values
+        in comment lines above the header.
+
+        Diagnostics, progress and errors never land inside the export file.
+        Distances are in kilometres, matching what the interface shows.
+
+        This endpoint runs synchronously and may take seconds or minutes for large datasets.
+        """
+        refused = refusal_for_removed_parameter(request.query_params)
+        if refused is not None:
+            return refused
+
+        # Run the entire search+export in an executor to avoid blocking the event loop.
+        loop = asyncio.get_running_loop()
+
+        def run_export(db: Path) -> bytes:
+            """Run the search and export in a background thread."""
+            from distnsimilarity.search import SearchRequest
+
+            diff = (
+                None
+                if from_place is None
+                else DifferenceRange(
+                    limit=DEFAULT_DIFFERENCE_LIMIT
+                    if difference_limit is None
+                    else difference_limit,
+                    exclude_identical_names=exclude_identical_names,
+                )
+            )
+            ranking = parse_direction(direction)
+            try:
+                request = SearchRequest(
+                    n=n if from_place is None else None,
+                    dataset=dataset,
+                    min_population=min_population,
+                    equal_length_prefilter=not full_comparison,
+                    database=db,
+                    top_k=top_k,
+                    direction=ranking,
+                    from_place=from_place,
+                    difference=diff,
+                )
+            except InvalidSearchRequest as error:
+                return error_line(f"InvalidSearchRequest: {error}".encode())
+
+            session = open_search(request)
+            metadata = build_metadata(session)
+            export_path = (
+                session.database_path.parent / f"export_{session.stats.started_at:.6f}.csv"
+            )
+            with LegacyCsvWriter(export_path, metadata=metadata) as writer:
+                for match in session.pairs:
+                    writer.write(match.first, match.second, match.distance_km)
+            session.close()
+            csv_bytes = export_path.read_bytes()
+            export_path.unlink(missing_ok=True)
+            return csv_bytes
+
+        try:
+            db = cache_path()
+            csv_bytes = await loop.run_in_executor(None, run_export, db)
+        except PlaceNotFound as error:
+            return JSONResponse(
+                {"error": "PlaceNotFound", "message": str(error)}, status_code=404
+            )
+        except CacheNotImportedError as error:
+            return JSONResponse(
+                {"error": "CacheNotImported", "message": str(error)}, status_code=409
+            )
+
+        return Response(
+            content=csv_bytes,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="distnsimilarity-export.csv"',
             },
         )
 

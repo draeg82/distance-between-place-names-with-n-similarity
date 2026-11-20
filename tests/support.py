@@ -185,3 +185,36 @@ NOISY_DUMP_PAIR = ("abelard", "abelurd")
 
 #: The character difference `noisy_dump` is planted to match at.
 NOISY_CHARACTER_DIFFERENCE = 1
+
+#: One name in three countries, names one, two and three characters away from it, and one that is
+#: merely longer: the smallest cache a from-a-place search can be asked about (#9).
+#:
+#: The two Limas are 5,896 km and 6,128 km from Lima, Peru and only 434 km from each other, so a
+#: sweep that measured from the wrong one of them is caught by the kilometres rather than by a
+#: comment. `Limas` is a place, is a candidate, and cannot have a character difference with `Lima`
+#: at all - a sweep that read it at all would be doing work that cannot produce an answer.
+LIMA_PE = 3_936_456
+LIMA_US = 4_561_278
+LIMA_CA = 5_555_555
+LINA = 6_666_666
+LINO = 7_777_777
+BOBA = 8_888_888
+LIMAS = 9_999_999
+
+
+def lima_family_rows() -> list[dict[str, Any]]:
+    """The places `lima_family_database` holds, so a dump and a database can hold the same family."""
+    return [
+        dump_row(LIMA_PE, "Lima", -12.0464, -77.0428, population=9_750_000, countrycode="PE"),
+        dump_row(LIMA_US, "Lima", 40.5736, -84.1084, population=42_000, countrycode="US"),
+        dump_row(LIMA_CA, "Lima", 43.0, -80.0, population=3_000, countrycode="CA"),
+        dump_row(BOBA, "Boba", 30.0, 30.0, population=10_000, countrycode="MA"),
+        dump_row(LINO, "Lino", 20.0, 20.0, population=20_000, countrycode="IT"),
+        dump_row(LINA, "Lina", 10.0, 10.0, population=30_000, countrycode="ES"),
+        dump_row(LIMAS, "Limas", 40.0, 40.0, population=25_000, countrycode="LT"),
+    ]
+
+
+def lima_family_database(path: Path) -> Path:
+    """A cache whose whole point is that a name is not a place: three Limas, one search each."""
+    return place_database(path, lima_family_rows())

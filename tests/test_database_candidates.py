@@ -23,7 +23,6 @@ from distnsimilarity.db import (
     candidate_places,
     connect,
     import_places,
-    places_with_ascii_name,
     scan_database,
     scope_for,
 )
@@ -436,25 +435,9 @@ class TestTheScopeOfASearch:
         assert scope.pair_count == 0
 
 
-class TestTwoPlacesCanShareAName:
-    def test_a_name_is_a_question_not_an_answer(self, tmp_path: Path) -> None:
-        """Searching from a place by name has to offer the choices rather than guess: Lima is
-        in Peru and Ohio, and the distance between them is the interesting part."""
-        dump = write_dump(
-            tmp_path / "cities2.txt",
-            [
-                dump_row(50, "Lima", -12.05, -77.04, countrycode="PE", population=8_012_109),
-                dump_row(51, "Lima", 40.57, -83.62, countrycode="US", population=42_954),
-                dump_row(52, "Lim a", 1.0, 2.0),
-            ],
-        )
-        database = import_dump(tmp_path / "places.sqlite3", dump)
-
-        named = places_with_ascii_name(database, "Lima")
-        assert [place.geonameid for place in named] == [50, 51]
-        assert [place.country_code for place in named] == ["PE", "US"]
-        assert places_with_ascii_name(database, "lima") == []
-        assert places_with_ascii_name(database, "") == []
+# Reading a typed name up, and the rules about which places it is a question about, moved to
+# `tests/test_place_lookup.py` with `db.place_lookup`: a name is a question and a `geonameid` is
+# the answer, and neither is candidate generation.
 
 
 @pytest.fixture(scope="module")

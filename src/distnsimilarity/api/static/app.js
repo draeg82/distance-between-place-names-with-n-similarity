@@ -1,8 +1,9 @@
 /**
  * The browser adapter: the DOM half, which does nothing but ask for a search and draw it.
  *
- * Three requests, all to this server: `/v1/datasets` for the dataset choices, `/v1/estimate`
- * for the price, `/v1/search` for the search itself. The estimate is asked for first and shown
+ * Four requests, all to this server: `/v1/datasets` for the dataset choices, `/v1/places` for
+ * the places a typed name could mean, `/v1/estimate` for the price, `/v1/search` for the search
+ * itself. The estimate is asked for first and shown
  * before the stream opens, because a search over every place in the database is a decision
  * rather than a surprise. The stream is then read as it arrives - `started`, `progress`,
  * `results`, `done`, `error` - and every line is handed to the presentation module, which is
@@ -25,23 +26,47 @@ import {
   costWords,
   databaseWords,
   datasetChoices,
+  emptySweepWords,
   emptyWords,
   finishedWords,
   focusWords,
+  foundPlacesWords,
   listWords,
+  noPlaceChosenWords,
+  noPlaceNamedWords,
+  originWords,
   parseStream,
+  placeChoice,
   progressWords,
   refusalWords,
   rowCells,
   runningWords,
   searchingWords,
   stoppedWords,
+  tallyWords,
 } from "./results.js";
 import { landPaths, loadOutline, paint, sceneOf } from "./map.js";
 
 const DATASETS_ENDPOINT = "/v1/datasets";
 const ESTIMATE_ENDPOINT = "/v1/estimate";
 const SEARCH_ENDPOINT = "/v1/search";
+const PLACES_ENDPOINT = "/v1/places";
+
+/**
+ * The two searches this page can ask for, and the parameters only one of them takes.
+ *
+ * Everywhere mode asks for one character-difference value; a sweep from a place asks for the place and
+ * a range instead. What is shared - the dataset, the floor, the ranking, the size of the list - is
+ * asked for either way and goes out as the form holds it, so a field added to that fieldset is a
+ * parameter without a new line of script. Only each mode's own parameters are held back: this server
+ * refuses a request that sends both a value and a place, and refuses a range with no place to sweep it
+ * from, so a number left in the fieldset that is not showing would be a refused request rather than an
+ * unused box.
+ */
+const EVERYWHERE = "everywhere";
+const FROM_PLACE = "from-place";
+const EVERYWHERE_ONLY_PARAMETERS = ["n"];
+const SWEEP_ONLY_PARAMETERS = ["from_place", "difference_limit", "exclude_identical_names"];
 
 /** How long the focused arc takes to draw itself in. Long enough to follow, short enough to ignore. */
 const ARC_SECONDS = 0.9;
@@ -74,6 +99,15 @@ let stopButton = null;
 let mapCanvas = null;
 let mapContext = null;
 let arcCaption = null;
+let everywhereFields = null;
+let fromPlaceFields = null;
+let everywhereMode = null;
+let fromPlaceMode = null;
+let placeName = null;
+let findPlacesButton = null;
+let placeChoiceMenu = null;
+let lookupLine = null;
+let tallyLine = null;
 
 /** The search whose stream this page is still reading, if any, and the `started` event it answered with. */
 let running = null;
@@ -126,6 +160,37 @@ function setMessage(words) {
   messageLine.textContent = words;
 }
 
+/**
+ * The line inside the from-a-place controls, where a lookup answer belongs.
+ *
+ * It is a different line from `#message-line` on purpose: a lookup is not a search, so "no place is
+ * called that" and "the search found nothing" must not arrive on the same line as though they were
+ * the same answer to the same question.
+ */
+function setLookup(words) {
+  lookupLine.textContent = words;
+}
+
+/** Which search the page is being asked for: the mode radio says, and everywhere is the default. */
+function chosenMode() {
+  return fromPlaceMode.checked ? FROM_PLACE : EVERYWHERE;
+}
+
+/**
+ * Show the controls of the chosen mode and take away the other one's.
+ *
+ * `hidden` is for the reader and `disabled` is for the form: a control in a disabled fieldset cannot
+ * be submitted or validated, so a value left in the fieldset that is not showing cannot reach the
+ * wire or block a submit. Both, because either one alone leaves the other half wrong.
+ */
+function showMode() {
+  const sweeping = chosenMode() === FROM_PLACE;
+  everywhereFields.hidden = sweeping;
+  everywhereFields.disabled = sweeping;
+  fromPlaceFields.hidden = !sweeping;
+  fromPlaceFields.disabled = !sweeping;
+}
+
 /** The working indicator is the difference between a slow search and a hung one, so it is explicit. */
 function setWorking(searching) {
   workingIndicator.hidden = !searching;
@@ -140,12 +205,18 @@ function setWorking(searching) {
   document.body.classList.toggle("searching", searching);
 }
 
-/** The parameters as sent: empty fields are left out rather than sent as a blank population floor. */
+/**
+ * The parameters as sent: empty fields are left out rather than sent as a blank population floor.
+ *
+ * Only the chosen mode's parameters go out, because the other mode's are refused alongside them, and
+ * it is one string whether it is being priced or searched with.
+ */
 function parametersToSend() {
   const sent = new URLSearchParams();
+  const heldBack = chosenMode() === FROM_PLACE ? EVERYWHERE_ONLY_PARAMETERS : SWEEP_ONLY_PARAMETERS;
   for (const [name, field] of new FormData(form)) {
     const text = String(field).trim();
-    if (text !== "") {
+    if (text !== "" && !heldBack.includes(name)) {
       sent.set(name, text);
     }
   }
@@ -193,6 +264,63 @@ function messageFor(error) {
     return error.message;
   }
   return `Could not reach this server: ${error}`;
+}
+
+/**
+ * Look a typed name up, and hand the whole answer to the reader.
+ *
+ * A name is not a place: `Springfield` is a dozen places in a real dump, in several countries, and
+ * every distance a sweep reports depends on which one was meant. So every match becomes an option,
+ * in the order the server sent them (biggest population first, which is the server's ordering and not
+ * an opinion of this page), worded by the presentation module so two same-named places can be told
+ * apart. The placeholder stays, so "no place chosen yet" is a value the select can hold, and nothing
+ * is ever selected for the reader - not even when there is exactly one match (ADR 0011).
+ *
+ * A lookup failure is a lookup failure: a name under two characters, no place database, an unreachable
+ * server or a name nothing holds each get their own sentence on the lookup line, and none of them
+ * reach the search lines, because none of them are a search.
+ */
+async function lookupPlaces() {
+  const asked = String(placeName.value ?? "").trim();
+  if (asked === "") {
+    setLookup("Type a name first: the lookup asks for the spelling this database uses.");
+    return;
+  }
+  setLookup(`Looking up ${asked}...`);
+  try {
+    const found = await fetchJSON(`${PLACES_ENDPOINT}?${new URLSearchParams({ name: asked })}`);
+    const matches = found.matches ?? [];
+    const placeholder = placeChoiceMenu.children[0] ?? null;
+    const options = matches.map((place) => {
+      const option = document.createElement("option");
+      option.value = String(place.geonameid);
+      option.textContent = placeChoice(place);
+      return option;
+    });
+    // The whole menu is replaced, so a lookup of one name cannot leave last lookup's places on it.
+    placeChoiceMenu.replaceChildren(...(placeholder === null ? options : [placeholder, ...options]));
+    // A menu with nothing to choose stays shut: the sentence below says why, and a dead option in an
+    // open menu would look choosable. Filling it opens it, and it does not shut again after that.
+    placeChoiceMenu.disabled = options.length === 0;
+    if (options.length === 0) {
+      setLookup(noPlaceNamedWords(found));
+      return;
+    }
+    setLookup(foundPlacesWords(found));
+  } catch (error) {
+    setLookup(messageFor(error));
+  }
+}
+
+/**
+ * Whether a sweep has a place to be measured from.
+ *
+ * The question is asked of the parameters about to be sent rather than of the select, so the refusal
+ * is about the request that would really have gone out - a request the server would answer with a 422
+ * that says less than this sentence does.
+ */
+function placeIsChosen(sent) {
+  return String(new URLSearchParams(sent).get("from_place") ?? "") !== "";
 }
 
 /**
@@ -267,6 +395,17 @@ function clearRows() {
   resultsTable.hidden = true;
   showCaption();
   drawMap();
+}
+
+/**
+ * Draw the tally of a sweep: what each value of its range has found so far.
+ *
+ * The numbers are the server's, straight off the event, and drawn from all four kinds of event that
+ * carry them - the shape of the answer at `started`, then the counts as they fill in. Everywhere mode
+ * sends an empty list, and its line is left empty rather than filled with a sentence about nothing.
+ */
+function showTally(event) {
+  tallyLine.textContent = tallyWords(event);
 }
 
 /**
@@ -463,16 +602,24 @@ function handle(event) {
     latest = event;
     estimateLine.textContent = costWords(event);
     setStatus(searchingWords(event));
+    showTally(event);
+    if (event.origin) {
+      // The id the reader chose is not the answer: `origin` is the place the database had behind it,
+      // and naming it is what makes every distance on the map readable as a distance from there.
+      setLookup(originWords(event));
+    }
     return;
   }
   if (event.type === "progress") {
     latest = event;
     progressLine.textContent = progressWords(event);
+    showTally(event);
     return;
   }
   if (event.type === "results") {
     latest = event;
     showList(event);
+    showTally(event);
     return;
   }
   if (event.type === "done") {
@@ -483,7 +630,15 @@ function handle(event) {
       clearRows();
     }
     setStatus(foundNothing ? "Search finished with nothing to show" : "Search finished");
-    setMessage(foundNothing ? emptyWords(echo, event) : finishedWords(event));
+    // A sweep that ran its whole range and matched nothing has its own sentence, naming the place it
+    // swept from and the range it swept; a lookup that found no such place is said elsewhere, on the
+    // lookup line, because that is a different dead end.
+    if (foundNothing) {
+      setMessage(echo.origin ? emptySweepWords(echo, event) : emptyWords(echo, event));
+    } else {
+      setMessage(finishedWords(event));
+    }
+    showTally(event);
     return;
   }
   if (event.type === "error") {
@@ -548,11 +703,22 @@ function abandon() {
  *
  * The page never reloads, so changing the parameters and searching again is one press after this one
  * has ended - and the scan that was running is finished or stopped by then, not orphaned.
+ *
+ * A sweep with no place chosen is refused here too, before any of this begins: the server would refuse
+ * it, but the page knows which control is empty, and can name it.
  */
 export async function start(event) {
   event?.preventDefault?.();
   if (running !== null) {
     setMessage(runningWords(echo, latest));
+    return;
+  }
+  const sent = String(parametersToSend());
+  if (chosenMode() === FROM_PLACE && !placeIsChosen(sent)) {
+    // Nothing is started, so nothing is set up: no working indicator, no cleared list, no status, so
+    // a search that never began cannot look like one. The words go on the lookup line because the
+    // control that is missing is the one above it.
+    setLookup(noPlaceChosenWords());
     return;
   }
   const controller = new AbortController();
@@ -565,8 +731,8 @@ export async function start(event) {
   clearRows();
   setMessage("");
   progressLine.textContent = "";
+  tallyLine.textContent = "";
   setWorking(true);
-  const sent = String(parametersToSend());
   // The price is shown before the stream opens, but it is not asked for twice: the same sentence is
   // already on screen if the parameters have not moved since it was quoted. One parameter string
   // pays for this search and runs it, so a keystroke cannot split the two.
@@ -584,6 +750,7 @@ export async function start(event) {
     setStatus("Search not started");
     setMessage(messageFor(error));
     progressLine.textContent = "";
+    tallyLine.textContent = "";
   } finally {
     if (running === controller) {
       running = null;
@@ -648,6 +815,15 @@ function wireUpPage() {
   stopButton = document.getElementById("stop-button");
   mapCanvas = document.getElementById("world-map");
   arcCaption = document.getElementById("arc-caption");
+  everywhereFields = document.getElementById("everywhere-fields");
+  fromPlaceFields = document.getElementById("from-place-fields");
+  everywhereMode = document.getElementById("mode-everywhere");
+  fromPlaceMode = document.getElementById("mode-from-place");
+  placeName = document.getElementById("place-name");
+  findPlacesButton = document.getElementById("find-places");
+  placeChoiceMenu = document.getElementById("from_place");
+  lookupLine = document.getElementById("lookup-line");
+  tallyLine = document.getElementById("tally-line");
   mapContext = mapCanvas.getContext("2d");
 
   form.addEventListener("submit", (event) => {
@@ -659,6 +835,17 @@ function wireUpPage() {
   form.addEventListener("input", parametersChanged);
   form.addEventListener("change", parametersChanged);
   stopButton.addEventListener("click", stop);
+
+  // The mode radios are not parameters: they decide which set of parameters describes the search, so
+  // choosing one redraws the controls, and the fields it reveals are repriced by the same listeners
+  // that price every other parameter. Everywhere is the mode the page opens in.
+  for (const radio of [everywhereMode, fromPlaceMode]) {
+    radio.addEventListener("change", showMode);
+  }
+  showMode();
+  // A lookup is a button press and never a form submit: a submit would start a search while the
+  // reader is still deciding which place that search would be about.
+  findPlacesButton.addEventListener("click", lookupPlaces);
 
   // One pair of listeners for a table whose rows are replaced wholesale several times a second.
   resultRows.addEventListener("click", rowChosen);
