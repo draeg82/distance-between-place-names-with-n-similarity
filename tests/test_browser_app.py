@@ -58,7 +58,19 @@ THE_WIRE: dict[str, list[str]] = {
         "label",
         "candidate_pairs",
     ],
-    "the estimate": ["estimate", "seconds", "basis", "comparisons_per_second", "population_floor"],
+    "the estimate": [
+        "estimate",
+        "seconds",
+        "basis",
+        "comparisons_per_second",
+        "population_floor",
+        "requested_dataset",
+        "dataset",
+        "dataset_label",
+        "places",
+        "n",
+        "candidate_pairs",
+    ],
     "a started event": [
         "search_id",
         "dataset",
@@ -70,6 +82,8 @@ THE_WIRE: dict[str, list[str]] = {
         "top_k",
         "min_population",
         "candidate_pairs",
+        "origin",
+        "differences",
     ],
     "a progress event": [
         "pairs_compared",
@@ -77,8 +91,9 @@ THE_WIRE: dict[str, list[str]] = {
         "improvements",
         "elapsed_seconds",
         "estimated_seconds_remaining",
+        "differences",
     ],
-    "a results event": ["seen_pairs", "results"],
+    "a results event": ["seen_pairs", "results", "differences"],
     "one row of the top-K": [
         "first",
         "second",
@@ -95,7 +110,15 @@ THE_WIRE: dict[str, list[str]] = {
         "longitude",
         "geonameid",
     ],
-    "a done event": ["completed", "cancelled", "pairs", "error", "cancel_reason", "retryable"],
+    "a done event": [
+        "completed",
+        "cancelled",
+        "pairs",
+        "error",
+        "cancel_reason",
+        "retryable",
+        "differences",
+    ],
     "an error event": ["message"],
 }
 
@@ -989,7 +1012,16 @@ class TestTheWireThePageReads:
         """
         page = page_assets()["index.html"]
         sent = sorted(re.findall(r'<(?:input|select)\b[^>]*\bname="([^"]+)"', page))
-        assert sent == ["dataset", "direction", "min_population", "n", "top_k"], (
+        assert sent == [
+            "dataset",
+            "difference_limit",
+            "direction",
+            "exclude_identical_names",
+            "from_place",
+            "min_population",
+            "n",
+            "top_k",
+        ], (
             f"these names go out as query parameters: {sent}"
         )
         script = page_assets()["app.js"]
