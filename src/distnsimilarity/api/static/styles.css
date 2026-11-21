@@ -85,6 +85,20 @@ button {
   padding: 0.4rem 1.1rem;
 }
 
+.example-button {
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: 0.35rem;
+  color: var(--faint);
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.example-button:hover {
+  color: inherit;
+  border-style: solid;
+}
+
 body.searching #working-indicator {
   animation: working-spin 1.1s linear infinite;
   background: conic-gradient(currentColor, var(--line));
@@ -172,6 +186,67 @@ footer {
   margin-top: 2rem;
 }
 
+.glossary-button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  color: var(--faint);
+  font-size: 0.85rem;
+  font-weight: 400;
+  padding: 0.3rem 0.8rem;
+}
+
+.glossary-button:hover {
+  color: inherit;
+}
+
+.glossary {
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem;
+}
+
+.glossary h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem;
+}
+
+.glossary dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+}
+
+.glossary dt {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.glossary dd {
+  color: var(--faint);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.glossary dd + dt {
+  margin-top: 0.5rem;
+}
+
+.glossary code {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-radius: 0.2rem;
+  font-size: 0.85em;
+  padding: 0.1rem 0.3rem;
+}
+
+.glossary button {
+  margin-top: 0.75rem;
+}
+
 /*
   The map.
 
@@ -213,4 +288,12 @@ footer {
 .results-table tbody tr:focus-visible {
   outline: 2px solid var(--marked);
   outline-offset: -2px;
+}
+
+.message-line.error {
+  color: #c0392b;
+}
+
+.message-line.warning {
+  color: #b7791f;
 }

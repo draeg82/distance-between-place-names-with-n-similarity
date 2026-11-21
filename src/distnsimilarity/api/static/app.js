@@ -108,6 +108,13 @@ let findPlacesButton = null;
 let placeChoiceMenu = null;
 let lookupLine = null;
 let tallyLine = null;
+let exampleButton = null;
+let glossarySection = null;
+let glossaryToggle = null;
+let closeGlossaryButton = null;
+let nInput = null;
+let rankMenu = null;
+let topKInput = null;
 
 /** The search whose stream this page is still reading, if any, and the `started` event it answered with. */
 let running = null;
@@ -629,7 +636,7 @@ function handle(event) {
       // one would be a claim about a pair this search never found.
       clearRows();
     }
-    setStatus(foundNothing ? "Search finished with nothing to show" : "Search finished");
+    setStatus(foundNothing ? "Search completed \u2014 no matching pairs found" : "Search finished");
     // A sweep that ran its whole range and matched nothing has its own sentence, naming the place it
     // swept from and the range it swept; a lookup that found no such place is said elsewhere, on the
     // lookup line, because that is a different dead end.
@@ -783,6 +790,34 @@ export function stop(event) {
 }
 
 /**
+ * Run a sample search that demonstrates the tool with sensible defaults.
+ *
+ * Sets n=1 (one differing character), dataset=cities of 5,000 or more people,
+ * ranking=greatest distance first, top_k=50, then starts the search.
+ */
+function runExampleSearch() {
+  if (running !== null) {
+    return;
+  }
+  nInput.value = "1";
+  datasetMenu.value = "5000";
+  rankMenu.value = "greatest";
+  topKInput.value = "50";
+  if (glossarySection !== null) {
+    glossarySection.hidden = true;
+  }
+  void start();
+}
+
+/**
+ * Toggle the glossary panel on and off.
+ */
+function toggleGlossary() {
+  const isVisible = glossarySection !== null && !glossarySection.hidden;
+  glossarySection.hidden = !isVisible;
+}
+
+/**
  * Load the coastline from this server.
  *
  * The outline is data, committed in the package, so there is no library to fetch and nothing from
@@ -824,6 +859,13 @@ function wireUpPage() {
   placeChoiceMenu = document.getElementById("from_place");
   lookupLine = document.getElementById("lookup-line");
   tallyLine = document.getElementById("tally-line");
+  exampleButton = document.getElementById("example-button");
+  glossarySection = document.getElementById("glossary");
+  glossaryToggle = document.getElementById("glossary-toggle");
+  closeGlossaryButton = document.getElementById("close-glossary");
+  nInput = document.getElementById("n");
+  rankMenu = document.getElementById("rank");
+  topKInput = document.getElementById("top_k");
   mapContext = mapCanvas.getContext("2d");
 
   form.addEventListener("submit", (event) => {
@@ -849,6 +891,15 @@ function wireUpPage() {
     });
   }
   showMode();
+  if (exampleButton !== null) {
+    exampleButton.addEventListener("click", runExampleSearch);
+  }
+  if (glossaryToggle !== null) {
+    glossaryToggle.addEventListener("click", toggleGlossary);
+  }
+  if (closeGlossaryButton !== null) {
+    closeGlossaryButton.addEventListener("click", toggleGlossary);
+  }
   // A lookup is a button press and never a form submit: a submit would start a search while the
   // reader is still deciding which place that search would be about.
   findPlacesButton.addEventListener("click", lookupPlaces);
@@ -872,6 +923,7 @@ function wireUpPage() {
 
 // The page wires itself up when there is one. The functions above are what the tests call, and
 // they are reached for an element only once this has run.
+// Exposed for testing: start, stop, nameCell, rowFor.
 if (typeof document !== "undefined") {
   wireUpPage();
 }
