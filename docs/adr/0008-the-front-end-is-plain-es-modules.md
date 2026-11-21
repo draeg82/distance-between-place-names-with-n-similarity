@@ -1,10 +1,15 @@
 # The front end is plain ES modules, served by the search server
 
+> **Superseded by [ADR 0009: Front-end architecture decision](0009-the-front-end-architecture.md)**
+> This ADR captured the original reasoning for vanilla ES modules. The design decisions have
+> evolved — modern CSS with `@layer`, custom properties for all spacing and sizing, and a
+> strong design token system — but the core approach remains the same.
+
 The browser app is the third adapter over the seam (ADR 0002, ADR 0007), and it had three
 plausible shapes: a framework and a bundler with a `dist/` built before the page can be
 served, a static host beside the API, or four files handed out by the server that already
 answers the search they ask for. It is the last: `distnsimilarity-serve` serves the page at
-`/` and its three assets at `/static/{name}`, and the front end is `index.html`, `app.js`,
+`/` and its assets at `/static/{name}`, and the front end is `index.html`, `app.js`,
 `results.js` and `styles.css` written as they are shipped. Nothing is transformed, bundled or
 minified, nothing is installed with a package manager, and nothing is fetched from another
 machine - no CDN for a map library, no webfont, no analytics.
@@ -24,9 +29,38 @@ and table cells, and `app.js` is the adapter: it asks, reads the stream a line a
 each line to the presentation module, and puts what comes back into the page. That split is
 what lets the words and the marking of a name be run outside a browser, which is how "the
 differing characters are highlighted" and "a search that found nothing says so with the
-parameters it used" became assertions about output rather than about hope. Node is a developer's
+parameters it used" became assertions about output rather than hope. Node is a developer's
 tool for that, not a runtime dependency: where it is not installed those tests skip and say so,
 and everything else still runs.
+
+## Design system
+
+The CSS uses a strong design token system defined in `:root`:
+
+| Token | Value | Purpose |
+|-------|-------|---------|
+| `--line` | `color-mix(in srgb, currentColor 22%, transparent)` | Structural lines, borders |
+| `--faint` | `color-mix(in srgb, currentColor 62%, transparent)` | Secondary text |
+| `--marked` | `#ffd54a` | Accent color for highlights |
+| `--radius` | `0.5rem` | Single border radius for all rounded corners |
+| `--radius-xs` | `0.25rem` | Smaller radius for inline elements |
+| `--space-xs` | `0.25rem` | Smallest spacing (4px) |
+| `--space-sm` | `0.5rem` | Small spacing (8px) |
+| `--space-md` | `0.75rem` | Medium spacing (12px) |
+| `--space-lg` | `1rem` | Standard spacing (16px) |
+| `--space-xl` | `1.5rem` | Large spacing (24px) |
+| `--space-2xl` | `2rem` | Extra large spacing (32px) |
+| `--space-3xl` | `3rem` | Maximum spacing (48px) |
+| `--header-size` | `1.6rem` | Header font size |
+
+All spacing values are multiples of 4px. All rounded corners use `0.5rem` (8px) except for
+inline code elements which use `0.25rem`.
+
+## Cascade management
+
+The stylesheet uses CSS `@layer` for cascade management, ensuring that design tokens take
+precedence over any future user stylesheets and that the application stylesheet is fully
+predictable in its cascade order.
 
 ## Consequences
 
@@ -38,11 +72,11 @@ candidates from the API too, and an arc is drawn from coordinates the server sen
 
 Every field the page reads is checked against a real estimate, dataset listing and search
 stream - including the `error` event, which only happens when a stored row is not a place, so
-the fixture breaks one. A page that starts reading a field the API stopped sending fails in the
-suite rather than in front of a search.
+the fixture breaks one. A page that starts reading a field the API stopped sending fails in
+the suite rather than in front of a search.
 
 Static files live inside the package, so an installed wheel carries them and one process needs
-starting. The four names are the only ones the server will look up, so a request cannot walk out
+starting. The names are the only ones the server will look up, so a request cannot walk out
 of the folder, and an asset that is named but missing is a refusal naming the directory it
 should have been in: a broken install says which half of it is broken. Assets are read per
 request and served `no-store`, so editing the page is a reload on the machine that edited it.
@@ -53,5 +87,4 @@ parameters to check and a page has none.
 What this forecloses is worth naming, because it will look like an omission: no component
 model, no reactive state, no JSX, no code splitting, no minification. The app is a form, a
 stream reader and a table, which is what the streaming contract needs and less than what a
-framework would want. If a later round needs a map library or a build, that is a new decision
-and should supersede this one rather than quietly drift.
+framework would want.
