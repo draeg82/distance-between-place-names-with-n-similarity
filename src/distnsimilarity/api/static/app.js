@@ -71,6 +71,12 @@ const SWEEP_ONLY_PARAMETERS = ["from_place", "difference_limit", "exclude_identi
 /** How long the focused arc takes to draw itself in. Long enough to follow, short enough to ignore. */
 const ARC_SECONDS = 0.9;
 
+/** Cubic ease-out: draws fast then settles, feeling natural rather than mechanical. */
+function easeOutCubic(t) {
+  const u = 1 - t;
+  return 1 - u * u * u;
+}
+
 /**
  * What the caption says when there is no pair to name, which is not one thing but three.
  *
@@ -468,7 +474,8 @@ function drawInFocus() {
   const started = performance.now();
   const step = (now) => {
     const elapsed = (now - started) / 1000;
-    sharing = elapsed >= ARC_SECONDS ? 1 : elapsed / ARC_SECONDS;
+    const raw = elapsed >= ARC_SECONDS ? 1 : elapsed / ARC_SECONDS;
+    sharing = easeOutCubic(raw);
     drawMap();
     frame = sharing < 1 ? requestAnimationFrame(step) : null;
   };
