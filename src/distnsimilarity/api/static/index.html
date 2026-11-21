@@ -31,7 +31,7 @@
           <legend>Everywhere: the whole candidate set, one threshold</legend>
           <label>
             <span title="The number of positions at which two equal-length names have different characters — e.g. Springfield and Strafford differ by 4 characters">Differing characters</span>
-            <input id="n" name="n" type="number" min="0" step="1" value="1" required title="The exact number of positions where two names differ — e.g. Springfield vs Strafford has 4 differing characters" />
+            <input id="n" name="n" type="number" min="0" step="1" value="1" required max="40" title="The exact number of positions where two names differ — e.g. Springfield vs Strafford has 4 differing characters (max 40)" />
           </label>
         </fieldset>
 
@@ -64,12 +64,12 @@
               min="0"
               max="64"
               step="1"
-              placeholder="3"
+              value="3"
               title="How wide a range to search — from identical names up to this many differences"
             />
           </label>
           <label class="toggle" title="When checked, pairs of places with identical names are left out of the results — the pairs are still compared, so the count at zero keeps growing">
-            <span>Identical names</span>
+            <span>Exclude identical names</span>
             <input
               id="exclude_identical_names"
               name="exclude_identical_names"
@@ -109,7 +109,7 @@
           </label>
           <label>
             <span title="How many of the best pairs to keep in the list as the scan runs — the best-so-far list is the leading find at any moment">Best finds kept</span>
-            <input id="top_k" name="top_k" type="number" min="1" max="2000" step="1" value="50" title="How many top results to display — the best-so-far list grows as the scan finds closer or further pairs" />
+            <input id="top_k" name="top_k" type="number" min="1" max="2000" step="1" value="50" title="How many top results to keep in the best-so-far list, ranked by the chosen direction (greatest or least distance)" />
           </label>
         </fieldset>
         <div class="actions">
