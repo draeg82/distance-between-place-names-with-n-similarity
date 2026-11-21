@@ -117,6 +117,10 @@
           <button id="stop-button" type="button" hidden>Stop</button>
           <button id="example-button" type="button" class="example-button" title="Run a sample search with sensible defaults">Try an example search</button>
         </div>
+        <div id="post-search-actions" class="post-search-actions" hidden>
+          <button id="csv-button" type="button" class="example-button" title="Download the current best-so-far list as CSV">Download CSV</button>
+          <button id="rerun-button" type="button" class="example-button" title="Run the same search again">Rerun this search</button>
+        </div>
       </form>
 
       <section class="running">
@@ -152,6 +156,7 @@
             <th scope="col">Population</th>
             <th scope="col">Distance (km)</th>
             <th scope="col">Differing characters</th>
+            <th scope="col">Copy</th>
           </tr>
         </thead>
         <tbody id="result-rows"></tbody>

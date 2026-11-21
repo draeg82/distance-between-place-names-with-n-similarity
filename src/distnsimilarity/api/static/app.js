@@ -78,6 +78,34 @@ function easeOutCubic(t) {
 }
 
 /**
+ * Show the post-search action buttons (CSV export, rerun).
+ */
+function showPostSearchActions() {
+  if (postSearchActions !== null) {
+    postSearchActions.hidden = false;
+  }
+}
+
+/**
+ * Hide the post-search action buttons.
+ */
+function hidePostSearchActions() {
+  if (postSearchActions !== null) {
+    postSearchActions.hidden = true;
+  }
+}
+
+/**
+ * Copy a pair's details to the clipboard.
+ */
+function copyPair(first, second, distance) {
+  const text = `${first.display_name ?? first.asciiname} (${first.country_code}) — ${second.display_name ?? second.asciiname} (${second.country_code}) — ${distance} km`;
+  navigator.clipboard.writeText(text).catch(() => {
+    // Clipboard write is a nicety; failure is silently ignored.
+  });
+}
+
+/**
  * What the caption says when there is no pair to name, which is not one thing but three.
  *
  * A page that has not searched, a search that found nothing, and a list to pick from are different
@@ -121,6 +149,9 @@ let closeGlossaryButton = null;
 let nInput = null;
 let rankMenu = null;
 let topKInput = null;
+let postSearchActions = null;
+let csvButton = null;
+let rerunButton = null;
 
 /** The search whose stream this page is still reading, if any, and the `started` event it answered with. */
 let running = null;
@@ -522,9 +553,23 @@ function markFocus() {
 /** The row a click or a keypress belongs to, whichever element inside it it landed on. */
 function rowChosen(event) {
   const row = event.target?.closest?.("tr");
-  if (row && resultRows.contains(row)) {
-    focusOn(Number(row.dataset.index));
+  if (!row || !resultRows.contains(row)) {
+    return;
   }
+  // If the click was on a copy button, copy instead of focusing.
+  const copyBtn = event.target?.closest?.(".copy-btn");
+  if (copyBtn) {
+    const pairId = row.dataset.pair;
+    const [firstGeo, secondGeo] = pairId.split("/").map(Number);
+    const find = finds.find(
+      (f) => `${f.first.geonameid}/${f.second.geonameid}` === pairId,
+    );
+    if (find) {
+      copyPair(find.first, find.second, find.first.distance);
+    }
+    return;
+  }
+  focusOn(Number(row.dataset.index));
 }
 
 /**
@@ -577,6 +622,20 @@ export function rowFor(row, doc = document) {
     textCell(first.distance, doc),
     textCell(first.difference, doc),
   );
+  // Copy button for this row.
+  const td = doc.createElement("td");
+  const btn = doc.createElement("button");
+  btn.className = "copy-btn";
+  btn.title = "Copy pair details to clipboard";
+  btn.textContent = "\u{2398}";
+  if (typeof btn.addEventListener === "function") {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyPair(first, second, first.distance);
+    });
+  }
+  td.append(btn);
+  tr.append(td);
   return tr;
 }
 
@@ -653,6 +712,8 @@ function handle(event) {
       setMessage(finishedWords(event));
     }
     showTally(event);
+    // Show the post-search action buttons after any completed search.
+    showPostSearchActions();
     return;
   }
   if (event.type === "error") {
@@ -743,6 +804,7 @@ export async function start(event) {
   // After the echo is cleared, so the map's caption says "no search yet" rather than claiming this
   // one has already found nothing.
   clearRows();
+  hidePostSearchActions();
   setMessage("");
   progressLine.textContent = "";
   tallyLine.textContent = "";
@@ -825,6 +887,46 @@ function toggleGlossary() {
 }
 
 /**
+ * Download the current best-so-far list as CSV.
+ *
+ * Fetches /v1/export with the current form parameters and triggers a browser download.
+ */
+async function downloadCsv() {
+  const params = String(parametersToSend());
+  try {
+    const response = await fetch(`${DATASETS_ENDPOINT.replace("/v1/datasets", "/v1/export")}?${params}`);
+    if (!response.ok) {
+      console.error("CSV export failed:", response.status);
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "distn-similarity-results.csv";
+    document.body.append(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error("CSV export failed:", error);
+  }
+}
+
+/**
+ * Rerun the current search with the same parameters.
+ *
+ * Simply re-submits the form as-is.
+ */
+function rerunSearch() {
+  if (running !== null) {
+    return;
+  }
+  hidePostSearchActions();
+  void start();
+}
+
+/**
  * Load the coastline from this server.
  *
  * The outline is data, committed in the package, so there is no library to fetch and nothing from
@@ -873,6 +975,9 @@ function wireUpPage() {
   nInput = document.getElementById("n");
   rankMenu = document.getElementById("rank");
   topKInput = document.getElementById("top_k");
+  postSearchActions = document.getElementById("post-search-actions");
+  csvButton = document.getElementById("csv-button");
+  rerunButton = document.getElementById("rerun-button");
   mapContext = mapCanvas.getContext("2d");
 
   form.addEventListener("submit", (event) => {
@@ -883,6 +988,13 @@ function wireUpPage() {
   // the other; a repeat of a parameter string already priced is answered from `costFor`.
   form.addEventListener("input", parametersChanged);
   form.addEventListener("change", parametersChanged);
+  // Ctrl+Enter (or Cmd+Enter on Mac) submits the search form.
+  form.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void start(event);
+    }
+  });
   stopButton.addEventListener("click", stop);
 
   // The mode radios are not parameters: they decide which set of parameters describes the search, so
@@ -900,6 +1012,12 @@ function wireUpPage() {
   showMode();
   if (exampleButton !== null) {
     exampleButton.addEventListener("click", runExampleSearch);
+  }
+  if (csvButton !== null) {
+    csvButton.addEventListener("click", downloadCsv);
+  }
+  if (rerunButton !== null) {
+    rerunButton.addEventListener("click", rerunSearch);
   }
   if (glossaryToggle !== null) {
     glossaryToggle.addEventListener("click", toggleGlossary);

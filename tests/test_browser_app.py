@@ -1248,7 +1248,7 @@ class TestThePageWhileTheSearchRuns:
         headers = re.findall(r"<th\b", page_assets()["index.html"])
         [row] = in_the_adapter("rowFor", [[TestThePresentationItself.ROW]])
         cells = row["children"]
-        assert len(cells) == len(headers) == 8, (
+        assert len(cells) == len(headers) == 9, (
             f"the page declares {len(headers)} columns and a row draws {len(cells)}"
         )
         assert [cell["class"] for cell in cells] == [
@@ -1260,7 +1260,13 @@ class TestThePageWhileTheSearchRuns:
             "",
             "",
             "",
+            "",  # copy button cell (button inside has class 'copy-btn')
         ], "only the two names are marked-up runs; the rest is plain text"
+        # The copy button is inside the last cell.
+        copyCell = cells[8]
+        assert copyCell["children"] == [{"tag": "button", "class": "copy-btn", "title": "Copy pair details to clipboard", "text": "⎘", "children": []}], (
+            f"the last cell has the copy button: {copyCell}"
+        )
         assert cells[6]["text"] == "9,876.543", cells[6]
         assert cells[7]["text"] == "1 differing character", cells[7]
         assert [span["text"] for span in cells[3]["children"]] == ["B", "nalac"]
