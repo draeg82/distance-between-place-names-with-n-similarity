@@ -650,7 +650,7 @@ function handle(event) {
   }
   if (event.type === "error") {
     setStatus("Search failed");
-    setMessage(event.message);
+    setError(event.message);
   }
 }
 
@@ -755,7 +755,7 @@ export async function start(event) {
       return;
     }
     setStatus("Search not started");
-    setMessage(messageFor(error));
+    setError(messageFor(error));
     progressLine.textContent = "";
     tallyLine.textContent = "";
   } finally {
