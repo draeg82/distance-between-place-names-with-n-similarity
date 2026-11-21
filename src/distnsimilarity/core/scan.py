@@ -24,6 +24,42 @@ POLL_EVERY_COMPARISONS = 4_096
 #: thread-safe and must not block.
 CancelCheck = Callable[[], bool]
 
+#: Run monitoring (progress reporting and cancellation) at a poll boundary.
+#:
+#: Reports how many comparisons have happened since the last call and asks
+#: whether the loop should stop.
+#
+#: Returns ``(cancel_requested, progress_delta)`` so the caller can update
+#: ``reported`` from the delta and check ``cancel_requested`` to exit.
+def check_monitoring(
+    monitoring: bool,
+    progress: Progress | None,
+    comparisons: int,
+    reported: int,
+    poll_every_comparisons: int,
+    cancel: CancelCheck | None,
+) -> tuple[bool, int]:
+    """Check progress and cancellation at a poll boundary.
+
+    Called at regular intervals inside an inner loop. Reports how many
+    comparisons have happened since the last call and asks whether the loop
+    should stop.
+
+    Returns a ``(cancel_requested, progress_delta)`` pair. The caller should
+    update ``reported`` from the delta and check ``cancel_requested`` to
+    decide whether to exit the loop.
+    """
+    if monitoring and comparisons % poll_every_comparisons == 0:
+        delta = 0
+        if progress is not None and comparisons != reported:
+            delta = comparisons - reported
+            progress(delta)
+        # Cancel is checked on every poll boundary, regardless of progress.
+        if cancel is not None and cancel():
+            return True, delta
+        return False, delta
+    return False, 0
+
 #: "These many more candidate pairs were compared." Called once per poll window rather than
 #: once per comparison, so an interface can show a fraction scanned without the inner loop
 #: paying for a callback per pair. The total is exact at every window boundary and can lag
@@ -116,12 +152,12 @@ def matching_pairs(
     reported = 0
     try:
         for second in partners:
-            if monitoring and comparisons % poll_every_comparisons == 0:
-                if progress is not None and comparisons != reported:
-                    progress(comparisons - reported)
-                    reported = comparisons
-                if cancel is not None and cancel():
-                    return
+            cancel_requested, progress_delta = check_monitoring(
+                monitoring, progress, comparisons, reported, poll_every_comparisons, cancel
+            )
+            if cancel_requested:
+                return
+            reported += progress_delta
             comparisons += 1
             if matches(first_name, second.asciiname, character_difference):
                 yield MatchedPair(

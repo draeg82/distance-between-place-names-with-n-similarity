@@ -32,6 +32,7 @@ from distnsimilarity.core.scan import (
     CancelCheck,
     MatchedPair,
     Progress,
+    check_monitoring,
 )
 
 #: How far up the range a from-a-place search sweeps when nobody says. Three is wide enough to
@@ -227,12 +228,12 @@ class Sweep:
         reported = 0
         try:
             for second in partners:
-                if monitoring and comparisons % poll_every_comparisons == 0:
-                    if progress is not None and comparisons != reported:
-                        progress(comparisons - reported)
-                        reported = comparisons
-                    if cancel is not None and cancel():
-                        return
+                cancel_requested, progress_delta = check_monitoring(
+                    monitoring, progress, comparisons, reported, poll_every_comparisons, cancel
+                )
+                if cancel_requested:
+                    return
+                reported += progress_delta
                 if second.geonameid == origin_id:
                     # Not a comparison, so not counted as one: this partner is the place itself.
                     continue
