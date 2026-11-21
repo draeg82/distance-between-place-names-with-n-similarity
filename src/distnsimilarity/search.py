@@ -529,6 +529,9 @@ class SearchSession:
             # The reader gave up on the search. That is a way of ending, not a failure, and
             # saying otherwise would turn every closed connection into a reported error.
             raise
+        except (KeyboardInterrupt, SystemExit):
+            # Process lifecycle signals are not search errors.
+            raise
         except BaseException as error:
             self.stats.error = f"{type(error).__name__}: {error}"
             raise

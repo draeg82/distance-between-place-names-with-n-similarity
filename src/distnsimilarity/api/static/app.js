@@ -216,7 +216,7 @@ function parametersToSend() {
   const heldBack = chosenMode() === FROM_PLACE ? EVERYWHERE_ONLY_PARAMETERS : SWEEP_ONLY_PARAMETERS;
   for (const [name, field] of new FormData(form)) {
     const text = String(field).trim();
-    if (text !== "" && !heldBack.includes(name)) {
+    if (text !== "" && !heldBack.includes(name) && name !== "mode") {
       sent.set(name, text);
     }
   }
@@ -841,6 +841,12 @@ function wireUpPage() {
   // that price every other parameter. Everywhere is the mode the page opens in.
   for (const radio of [everywhereMode, fromPlaceMode]) {
     radio.addEventListener("change", showMode);
+    radio.addEventListener("change", () => {
+      const other = radio === everywhereMode ? fromPlaceMode : everywhereMode;
+      if (other.checked) {
+        other.checked = false;
+      }
+    });
   }
   showMode();
   // A lookup is a button press and never a form submit: a submit would start a search while the

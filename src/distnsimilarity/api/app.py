@@ -768,6 +768,10 @@ def create_app(
         try:
             db = cache_path()
             csv_bytes = await loop.run_in_executor(None, run_export, db)
+        except TypeError as error:
+            return JSONResponse(
+                {"error": "InvalidSearchRequest", "message": str(error)}, status_code=422
+            )
         except PlaceNotFound as error:
             return JSONResponse(
                 {"error": "PlaceNotFound", "message": str(error)}, status_code=404

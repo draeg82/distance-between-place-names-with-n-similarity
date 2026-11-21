@@ -143,7 +143,11 @@ def _stop_on_signal(control: SearchControl) -> Callable[[int, FrameType | None],
     """
 
     def handle(signum: int, _frame: FrameType | None) -> None:
-        control.cancel(f"stopped by {signal.Signals(signum).name}")
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = f"signal {signum}"
+        control.cancel(f"stopped by {name}")
 
     return handle
 
@@ -223,10 +227,19 @@ def main(argv: Sequence[str] | None = None, *, control: SearchControl | None = N
     if request.min_population is not None and stats.population_floor != request.dataset_threshold:
         floor = f", at a population floor of {stats.population_floor:,}"
 
-    print(
-        f"{pairs} pair(s) at n={arguments.n} from {session.name}{floor} "
-        f"({stats.places} places in {session.database_path}) written to {arguments.output}"
-    )
+    if session.request.mode == "everywhere":
+        print(
+            f"{pairs} pair(s) at n={arguments.n} from {session.name}{floor} "
+            f"({stats.places} places in {session.database_path}) written to {arguments.output}"
+        )
+    else:
+        limit = arguments.difference_limit
+        limit_str = limit if limit is not None else 3
+        print(
+            f"{pairs} pair(s) from {session.origin.asciiname} ({session.origin.country_code}), "
+            f"range 0..{limit_str} at {session.name}{floor} "
+            f"({stats.places} places in {session.database_path}) written to {arguments.output}"
+        )
     return 0
 
 
