@@ -143,9 +143,6 @@ let placeChoiceMenu = null;
 let lookupLine = null;
 let tallyLine = null;
 let exampleButton = null;
-let glossarySection = null;
-let glossaryToggle = null;
-let closeGlossaryButton = null;
 let nInput = null;
 let rankMenu = null;
 let topKInput = null;
@@ -881,18 +878,7 @@ function runExampleSearch() {
   datasetMenu.value = "5000";
   rankMenu.value = "greatest";
   topKInput.value = "50";
-  if (glossarySection !== null) {
-    glossarySection.hidden = true;
-  }
   void start();
-}
-
-/**
- * Toggle the glossary panel on and off.
- */
-function toggleGlossary() {
-  const isVisible = glossarySection !== null && !glossarySection.hidden;
-  glossarySection.hidden = !isVisible;
 }
 
 /**
@@ -978,9 +964,6 @@ function wireUpPage() {
   lookupLine = document.getElementById("lookup-line");
   tallyLine = document.getElementById("tally-line");
   exampleButton = document.getElementById("example-button");
-  glossarySection = document.getElementById("glossary");
-  glossaryToggle = document.getElementById("glossary-toggle");
-  closeGlossaryButton = document.getElementById("close-glossary");
   nInput = document.getElementById("n");
   rankMenu = document.getElementById("rank");
   topKInput = document.getElementById("top_k");
@@ -1027,12 +1010,6 @@ function wireUpPage() {
   }
   if (rerunButton !== null) {
     rerunButton.addEventListener("click", rerunSearch);
-  }
-  if (glossaryToggle !== null) {
-    glossaryToggle.addEventListener("click", toggleGlossary);
-  }
-  if (closeGlossaryButton !== null) {
-    closeGlossaryButton.addEventListener("click", toggleGlossary);
   }
   // A lookup is a button press and never a form submit: a submit would start a search while the
   // reader is still deciding which place that search would be about.

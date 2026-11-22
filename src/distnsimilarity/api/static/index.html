@@ -10,7 +10,7 @@
   <body>
     <header>
       <h1>Places whose names differ by <em>n</em> characters</h1>
-      <p id="database-line" class="database-line">Asking this server which places it searches&hellip;</p>
+      <p id="database-line" class="database-line">Finds pairs of places whose names differ by exactly <em>n</em> characters, and how far apart they are.</p>
     </header>
 
     <main>
@@ -163,40 +163,6 @@
       </table>
     </main>
 
-    <section id="glossary" class="glossary" hidden>
-      <h2>Glossary</h2>
-      <dl>
-        <dt>Character difference</dt>
-        <dd>The number of positions at which two equal-length names hold different characters. Nothing is inserted or deleted; names of different lengths have no character difference at all.</dd>
-        <dt>Threshold</dt>
-        <dd>The character difference being asked for. A pair matches when its character difference equals the threshold exactly.</dd>
-        <dt>Dataset</dt>
-        <dd>Which places are included in a search, based on population. "Whole database" means every place in the place database.</dd>
-        <dt>Place database</dt>
-        <dd>The generated table of places that a search reads. Built from GeoNames dumps by the import command.</dd>
-        <dt>Scan</dt>
-        <dd>One complete walk over a candidate set at one threshold. Pairs arrive as they are found rather than all at the end.</dd>
-        <dt>Sweep</dt>
-        <dd>A from-a-place search: one selected place walked against candidates over a range of character differences.</dd>
-        <dt>Best-so-far list</dt>
-        <dd>The best distances found so far, at most <code>top_k</code> of them, in the order the search ranked them.</dd>
-        <dt>Leading find</dt>
-        <dd>The pair at the head of the best-so-far list, drawn bold on the map.</dd>
-        <dt>Focused pair</dt>
-        <dd>A find the reader has picked out of the list — the one whose arc is bold and whose coordinates are printed under the map.</dd>
-      </dl>
-      <button id="close-glossary" type="button">Close</button>
-    </section>
 
-    <footer>
-      <p>
-        Matching, ranking and distances come from this server: every row on this page arrived on a
-        search stream, and every place in the name chooser arrived from a lookup. Nothing here
-        compares two names, measures a distance, or decides which of two same-named places a reader
-        meant &mdash; the map bends arcs between the places it was given, and the kilometres beside
-        them are the API's.
-      </p>
-      <p><button id="glossary-toggle" type="button" class="glossary-button" title="Show definitions of key terms">Glossary</button></p>
-    </footer>
   </body>
 </html>
