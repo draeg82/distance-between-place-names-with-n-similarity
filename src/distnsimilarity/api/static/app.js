@@ -143,9 +143,6 @@ let placeChoiceMenu = null;
 let lookupLine = null;
 let tallyLine = null;
 let exampleButton = null;
-let glossarySection = null;
-let glossaryToggle = null;
-let closeGlossaryButton = null;
 let nInput = null;
 let rankMenu = null;
 let topKInput = null;
@@ -658,7 +655,14 @@ export function rowFor(row, doc = document) {
  * The map is redrawn from the same event as the table, and the new lead's arc draws itself in: a
  * list that improves eleven times is eleven arcs, which is the scan's progress made visible.
  */
+function leadKey(row) {
+  return row ? `${row.first?.geonameid}/${row.second?.geonameid}` : "";
+}
+
 function showList(event) {
+  // The bold arc only draws itself in when the leading pair is a different pair. A list that improved
+  // further down leaves the lead where it is, so the lead is not redrawn or restarted.
+  const leadChanged = leadKey(finds[0]) !== leadKey(event.results[0]) || focus !== 0;
   finds = event.results;
   focus = 0;
   // The index is where a find sits in the list, which is a fact about the table being filled now
@@ -674,7 +678,11 @@ function showList(event) {
   setStatus(listWords(event));
   markFocus();
   showCaption();
-  drawInFocus();
+  if (leadChanged) {
+    drawInFocus();
+  } else {
+    drawMap();
+  }
 }
 
 /** One line of the stream, routed by the kind of event it is. */
@@ -881,18 +889,7 @@ function runExampleSearch() {
   datasetMenu.value = "5000";
   rankMenu.value = "greatest";
   topKInput.value = "50";
-  if (glossarySection !== null) {
-    glossarySection.hidden = true;
-  }
   void start();
-}
-
-/**
- * Toggle the glossary panel on and off.
- */
-function toggleGlossary() {
-  const isVisible = glossarySection !== null && !glossarySection.hidden;
-  glossarySection.hidden = !isVisible;
 }
 
 /**
@@ -978,9 +975,6 @@ function wireUpPage() {
   lookupLine = document.getElementById("lookup-line");
   tallyLine = document.getElementById("tally-line");
   exampleButton = document.getElementById("example-button");
-  glossarySection = document.getElementById("glossary");
-  glossaryToggle = document.getElementById("glossary-toggle");
-  closeGlossaryButton = document.getElementById("close-glossary");
   nInput = document.getElementById("n");
   rankMenu = document.getElementById("rank");
   topKInput = document.getElementById("top_k");
@@ -1027,12 +1021,6 @@ function wireUpPage() {
   }
   if (rerunButton !== null) {
     rerunButton.addEventListener("click", rerunSearch);
-  }
-  if (glossaryToggle !== null) {
-    glossaryToggle.addEventListener("click", toggleGlossary);
-  }
-  if (closeGlossaryButton !== null) {
-    closeGlossaryButton.addEventListener("click", toggleGlossary);
   }
   // A lookup is a button press and never a form submit: a submit would start a search while the
   // reader is still deciding which place that search would be about.

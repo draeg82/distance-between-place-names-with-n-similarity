@@ -397,7 +397,7 @@ export function databaseWords(listing) {
     const where = database.present ? " holds no places" : " does not exist";
     return `The place database at ${database.path}${where}. Run distnsimilarity-import to build it, then press search again.`;
   }
-  return `${formatNumber(database.places)} places in ${database.path}, searched as one place database.`;
+  return `Finds pairs of places whose names differ by exactly n characters, and how far apart they are. ${formatNumber(database.places)} places to search.`;
 }
 
 /**

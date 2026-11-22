@@ -1661,7 +1661,7 @@ class TestThePresentationItself:
             ],
         }
         [words] = in_presentation("databaseWords", [[imported]])
-        assert "146,782" in words and "/srv/p.sqlite3" in words, words
+        assert "146,782" in words and "differ by exactly" in words, words
 
     def test_the_working_names_the_search_it_is_working_on(self) -> None:
         """`started` becomes the status line: which dataset, which threshold, which search."""
