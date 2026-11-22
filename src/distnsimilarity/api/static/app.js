@@ -297,6 +297,10 @@ async function fillDatasetChoices() {
       }),
     );
     datasetMenu.disabled = choices.length === 0;
+    // Start on a fast search: the whole database is minutes of scanning, 15,000+ is seconds.
+    if (choices.some((choice) => choice.value === "15000")) {
+      datasetMenu.value = "15000";
+    }
   } catch (error) {
     datasetMenu.disabled = true;
     databaseLine.textContent = messageFor(error);
@@ -411,6 +415,11 @@ async function quoteCost(sent) {
  * has to be, even if a keystroke lands while the answer is on its way back.
  */
 async function showCost(sent) {
+  // A sweep with no place chosen has no price, and asking would only earn a 422.
+  if (chosenMode() === FROM_PLACE && !placeIsChosen(sent)) {
+    estimateLine.textContent = "";
+    return;
+  }
   if (cost !== null && costFor === sent) {
     estimateLine.textContent = costWords(cost);
     return;

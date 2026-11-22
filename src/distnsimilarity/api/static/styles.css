@@ -18,6 +18,8 @@
   --line: color-mix(in srgb, currentColor 22%, transparent);
   --faint: color-mix(in srgb, currentColor 62%, transparent);
   --marked: #ffd54a;
+  --accent: #1f5fbf;
+  --accent-ink: #fff;
   --radius: 0.5rem;
   --radius-xs: 0.25rem;
   --space-xs: 0.25rem;
@@ -28,6 +30,12 @@
   --space-2xl: 2rem;
   --space-3xl: 3rem;
   --header-size: 1.6rem;
+}
+
+/* An author `display` rule must never beat the `hidden` attribute: the mode switch, the Stop
+   button and the post-search actions all rely on it. */
+[hidden] {
+  display: none !important;
 }
 
 body {
@@ -347,4 +355,112 @@ footer {
 
 .message-line.warning {
   color: #b7791f;
+}
+
+
+/* ---- Layout polish ---- */
+
+.controls .mode-choice {
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.controls .mode-choice label,
+.controls label.toggle {
+  align-items: center;
+  flex-direction: row;
+  gap: var(--space-sm);
+}
+
+.controls .mode-choice span,
+.controls label.toggle span {
+  color: inherit;
+}
+
+.controls .mode-choice input,
+.controls label.toggle input {
+  margin: 0;
+  padding: 0;
+}
+
+.controls fieldset {
+  margin: 0 0 var(--space-md);
+}
+
+.controls input:focus-visible,
+.controls select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Search is the one primary action on the page; everything else is secondary. */
+#start-button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+#start-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.controls .actions,
+.post-search-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+footer {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-lg);
+}
+
+footer p {
+  font-size: 0.8rem;
+  margin: 0 0 var(--space-md);
+  max-width: 60rem;
+}
+
+.results-table-scroll,
+main {
+  min-width: 0;
+}
+
+@media (max-width: 48rem) {
+  :root {
+    --header-size: 1.25rem;
+  }
+
+  .controls fieldset {
+    flex-direction: column;
+  }
+
+  .controls input,
+  .controls select {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .controls .mode-choice input,
+  .controls label.toggle input {
+    width: auto;
+  }
+
+  .results-table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #6aa5ff;
+    --accent-ink: #0b1b33;
+  }
 }
