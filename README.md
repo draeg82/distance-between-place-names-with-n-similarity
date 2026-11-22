@@ -12,15 +12,64 @@ inherits.
 
 ## Quick start
 
+You need two things: [git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/)
+(uv fetches the right Python itself, so you do not install Python separately).
+
+**macOS / Linux**
+
 ```bash
 git clone https://github.com/draeg82/distance-between-place-names-with-n-similarity.git
 cd distance-between-place-names-with-n-similarity
-./run.sh          # Windows: .\run.ps1
+./run.sh
 ```
 
-That installs dependencies with [uv](https://docs.astral.sh/uv/), builds the place database if
-it is missing, starts the server and opens http://127.0.0.1:8000. `PORT=9000 ./run.sh` changes the
-port; `NO_BROWSER=1 ./run.sh` skips opening a tab.
+**Windows** (Command Prompt or PowerShell)
+
+```bat
+git clone https://github.com/draeg82/distance-between-place-names-with-n-similarity.git
+cd distance-between-place-names-with-n-similarity
+run
+```
+
+The script installs dependencies, builds the place database if `places.sqlite3` is missing
+(about a second), starts the server and opens <http://127.0.0.1:8000> in your browser. Press
+Ctrl-C in the terminal to stop it. Run it again any time; the database is only built once.
+
+If uv is missing the script says so and prints the install command:
+
+| System | Install uv |
+| --- | --- |
+| macOS / Linux | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Windows | `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"` |
+
+Open a new terminal after installing uv so it is on your `PATH`.
+
+**Options:** `PORT=9000 ./run.sh` (Windows: `set PORT=9000` then `run`) changes the port;
+`NO_BROWSER=1 ./run.sh` skips opening a tab; `HOST=0.0.0.0 ./run.sh` makes it reachable from
+other machines - the page and the API are then public to that network, so only do that on one
+you trust.
+
+### Using the app
+
+1. Press **Try an example search**, or choose a number of differing characters and press
+   **Search**. Results stream in while the scan runs and the best pairs appear on the map.
+2. **From a place** searches outward from one place you name: type a name, press **Find places**,
+   pick the one you mean, press **Search**.
+3. **Download CSV** saves the current list once there are results.
+
+Smaller datasets (cities of 15,000 or more) finish in seconds; "every place" compares about 927
+million pairs and takes minutes. The app prices a search before you run it.
+
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `uv: command not found` / "not recognized" | Install uv (table above), then open a new terminal. |
+| Windows: scripts are disabled | Use `run` (or `powershell -ExecutionPolicy Bypass -File .\run.ps1`); it bypasses the policy for this one script. |
+| `cannot listen on 127.0.0.1:8000` | Something else uses the port: `PORT=8001 ./run.sh`. |
+| Page says the database is empty or missing | Delete `places.sqlite3` and run again, or `uv run distnsimilarity-import --recreate`. |
+| `./run.sh: Permission denied` | `chmod +x run.sh` or `bash run.sh`. |
+| Odd import errors on macOS in `~/Desktop` or `~/Documents` | See [If the tool will not start](#if-the-tool-will-not-start); clone elsewhere. |
 
 ## Install
 

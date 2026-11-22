@@ -2,7 +2,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-  Write-Error "uv is required. Install: powershell -c `"irm https://astral.sh/uv/install.ps1 | iex`""
+  Write-Host "uv is required. Install it with:`n  powershell -ExecutionPolicy ByPass -c `"irm https://astral.sh/uv/install.ps1 | iex`"`nthen open a NEW terminal and run this again."; exit 1
 }
 $port = if ($env:PORT) { $env:PORT } else { "8000" }
 uv sync

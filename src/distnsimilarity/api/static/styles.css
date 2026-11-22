@@ -464,3 +464,18 @@ main {
     --accent-ink: #0b1b33;
   }
 }
+
+/* Native dropdown lists are painted by the browser from the control's own colours. A transparent
+   select leaves dark text on a dark list in dark mode, so give the controls and their options
+   explicit theme-following colours. */
+.controls input,
+.controls select,
+.controls select option,
+.controls select optgroup {
+  background-color: Canvas;
+  color: CanvasText;
+}
+
+.controls input::placeholder {
+  color: var(--faint);
+}
