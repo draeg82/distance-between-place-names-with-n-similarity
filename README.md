@@ -10,6 +10,18 @@ committed dumps still contain places below it (677 in `cities5000.txt`, 52 in
 `cities15000.txt`), so a population floor is something this tool applies rather than
 inherits.
 
+## Quick start
+
+```bash
+git clone https://github.com/draeg82/distance-between-place-names-with-n-similarity.git
+cd distance-between-place-names-with-n-similarity
+./run.sh          # Windows: .\run.ps1
+```
+
+That installs dependencies with [uv](https://docs.astral.sh/uv/), builds the place database if
+it is missing, starts the server and opens http://127.0.0.1:8000. `PORT=9000 ./run.sh` changes the
+port; `NO_BROWSER=1 ./run.sh` skips opening a tab.
+
 ## Install
 
 One step, using [uv](https://docs.astral.sh/uv/):

@@ -297,6 +297,10 @@ async function fillDatasetChoices() {
       }),
     );
     datasetMenu.disabled = choices.length === 0;
+    // Start on a fast search: the whole database is minutes of scanning, 15,000+ is seconds.
+    if (choices.some((choice) => choice.value === "15000")) {
+      datasetMenu.value = "15000";
+    }
   } catch (error) {
     datasetMenu.disabled = true;
     databaseLine.textContent = messageFor(error);
