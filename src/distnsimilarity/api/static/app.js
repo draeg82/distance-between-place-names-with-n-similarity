@@ -655,7 +655,14 @@ export function rowFor(row, doc = document) {
  * The map is redrawn from the same event as the table, and the new lead's arc draws itself in: a
  * list that improves eleven times is eleven arcs, which is the scan's progress made visible.
  */
+function leadKey(row) {
+  return row ? `${row.first?.geonameid}/${row.second?.geonameid}` : "";
+}
+
 function showList(event) {
+  // The bold arc only draws itself in when the leading pair is a different pair. A list that improved
+  // further down leaves the lead where it is, so the lead is not redrawn or restarted.
+  const leadChanged = leadKey(finds[0]) !== leadKey(event.results[0]) || focus !== 0;
   finds = event.results;
   focus = 0;
   // The index is where a find sits in the list, which is a fact about the table being filled now
@@ -671,7 +678,11 @@ function showList(event) {
   setStatus(listWords(event));
   markFocus();
   showCaption();
-  drawInFocus();
+  if (leadChanged) {
+    drawInFocus();
+  } else {
+    drawMap();
+  }
 }
 
 /** One line of the stream, routed by the kind of event it is. */
